@@ -1,1 +1,1 @@
-worker: cd uni_agent && python scheduler.py
+worker: python scheduler.py
