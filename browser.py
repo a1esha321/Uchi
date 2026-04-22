@@ -428,6 +428,33 @@ class UniBrowser:
 
         print("  ✅ Тест отправлен")
 
+    def get_quiz_grade(self) -> str:
+        """Читает оценку со страницы результатов после сдачи теста."""
+        try:
+            time.sleep(3)
+            grade = self.page.evaluate("""() => {
+                const text = document.body.innerText;
+                // "Оценка: 8,00 из 10,00" или "8.00/10.00"
+                let m = text.match(/[Оо]ценк[аи][^:\\d\\n]{0,30}([\\d]+[,.]\\d+\\s*из\\s*[\\d]+[,.]\\d+)/i);
+                if (m) return m[1].trim();
+                // "Итоговая оценка: 80%"
+                m = text.match(/[Ии]тогова[яй]\\s+оценк[аи][^:\\d\\n]{0,10}([\\d]+[,.]?\\d*\\s*%?)/i);
+                if (m) return m[1].trim();
+                // Таблица с Grade/Оценка
+                const cells = [...document.querySelectorAll('td')];
+                for (let i = 0; i < cells.length - 1; i++) {
+                    const label = cells[i].innerText.trim().toLowerCase();
+                    if (label.includes('оценка') || label.includes('grade')) {
+                        const val = cells[i+1].innerText.trim();
+                        if (val && /[\\d]/.test(val)) return val;
+                    }
+                }
+                return '';
+            }""")
+            return grade or ""
+        except Exception:
+            return ""
+
     # ─── Задания ──────────────────────────────────────────────
 
     def get_assignment_info(self) -> dict:

@@ -23,6 +23,7 @@ import re
 import time
 import threading
 import queue
+import json
 from datetime import datetime, timedelta
 import requests
 from dotenv import load_dotenv
@@ -34,6 +35,7 @@ from agent import (
     get_upcoming_deadlines,
 )
 from debug_tool import debug_page, debug_test_page
+from qa_cache import QACache
 
 load_dotenv()
 
@@ -174,6 +176,93 @@ def schedule_lecture(subject, start_time: str, duration: int, event_id: str, web
     threading.Thread(target=waiter, daemon=True).start()
 
 
+# ─── Парсинг дедлайнов ───────────────────────────────────────
+
+_MONTH_MAP = {
+    "января": 1, "февраля": 2, "марта": 3, "апреля": 4,
+    "мая": 5, "июня": 6, "июля": 7, "августа": 8,
+    "сентября": 9, "октября": 10, "ноября": 11, "декабря": 12,
+}
+
+
+def _parse_deadline(s: str):
+    """Парсит дедлайн из ISO или русского формата Moodle."""
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(s)
+    except Exception:
+        pass
+    # "1 мая 2024, 23:59" или "13 апреля 2024, 09:00"
+    m = re.match(r"(\d{1,2})\s+(\w+)\s+(\d{4})[,\s]+(\d{1,2}):(\d{2})", s)
+    if m:
+        day, month_str, year, hour, minute = m.groups()
+        month = _MONTH_MAP.get(month_str.lower())
+        if month:
+            try:
+                return datetime(int(year), month, int(day), int(hour), int(minute))
+            except Exception:
+                pass
+    return None
+
+
+# ─── Напоминания о дедлайнах ─────────────────────────────────
+
+REMINDERS_FILE = "reminders_sent.json"
+
+
+def _load_reminders_sent() -> set:
+    if os.path.exists(REMINDERS_FILE):
+        try:
+            with open(REMINDERS_FILE, "r") as f:
+                return set(json.load(f))
+        except Exception:
+            pass
+    return set()
+
+
+def _save_reminders_sent(sent: set):
+    with open(REMINDERS_FILE, "w") as f:
+        json.dump(list(sent), f)
+
+
+def _deadline_reminder_loop():
+    """Фоновый поток: каждые 30 минут проверяет дедлайны и шлёт напоминания."""
+    while True:
+        try:
+            sent = _load_reminders_sent()
+            now = datetime.now()
+            reg = SubjectRegistry()
+
+            for subject in reg.all():
+                for url, deadline_str in subject.assignment_deadlines.items():
+                    deadline = _parse_deadline(deadline_str)
+                    if not deadline:
+                        continue
+                    delta = deadline - now
+                    hours_left = delta.total_seconds() / 3600
+                    if hours_left < 0:
+                        continue
+                    status = subject.assignment_status.get(url, "new")
+                    if status in ("submitted", "graded"):
+                        continue
+                    for threshold_h, label in [(24, "24 часа"), (1, "1 час")]:
+                        key = f"{url}_{threshold_h}h"
+                        if hours_left <= threshold_h and key not in sent:
+                            send(
+                                f"⏰ <b>Дедлайн через {label}!</b>\n\n"
+                                f"Предмет: <b>{subject.name}</b>\n"
+                                f"Срок: {deadline.strftime('%d.%m.%Y %H:%M')}\n"
+                                f"Задание: <code>{url[-60:]}</code>"
+                            )
+                            sent.add(key)
+
+            _save_reminders_sent(sent)
+        except Exception as e:
+            print(f"⚠️ Reminder loop: {e}")
+        time.sleep(1800)
+
+
 # ─── Обработка сообщений ──────────────────────────────────────
 
 registry = SubjectRegistry()
@@ -236,12 +325,14 @@ def handle_message(message: dict):
             "/scan — просканировать все курсы\n"
             "/subjects — список предметов\n"
             "/course <i>id</i> — карточка курса\n"
-            "/upcoming — ближайшие дедлайны\n"
+            "/upcoming — дедлайны из календаря\n"
+            "/reminders — мои дедлайны (с таймером)\n"
             "/quizzes — пройти все тесты\n"
             "/assignments — все задания\n\n"
             "<b>Дополнительно:</b>\n"
             "/preview <i>url</i> — dry-run\n"
             "/stats — статистика\n"
+            "/cache — статистика кэша Q&A\n"
             "/export <i>id</i> — конспекты\n"
             "/teachers — преподаватели\n"
             "/debug <i>url</i> — отладка\n"
@@ -468,6 +559,42 @@ def handle_message(message: dict):
              keyboard=subject_keyboard("webinar"))
         return
 
+    if text == "/reminders":
+        refresh_registry()
+        now = datetime.now()
+        items = []
+        for subject in registry.all():
+            for url, deadline_str in subject.assignment_deadlines.items():
+                deadline = _parse_deadline(deadline_str)
+                if not deadline or deadline <= now:
+                    continue
+                status = subject.assignment_status.get(url, "new")
+                delta = deadline - now
+                items.append((deadline, subject.name, status, delta, url))
+        items.sort(key=lambda x: x[0])
+        if not items:
+            send("Нет предстоящих дедлайнов")
+            return
+        lines = ["<b>⏰ Предстоящие дедлайны:</b>\n"]
+        for deadline, name, status, delta, url in items[:15]:
+            icon = "✅" if status in ("submitted", "graded") else "❗"
+            days = delta.days
+            hours = delta.seconds // 3600
+            time_str = f"{days}д {hours}ч" if days > 0 else f"{hours}ч"
+            lines.append(f"{icon} <b>{name}</b> — через {time_str} ({deadline.strftime('%d.%m %H:%M')})")
+        send("\n".join(lines))
+        return
+
+    if text == "/cache":
+        cache = QACache()
+        send(f"📦 {cache.stats_line()}\n\nДля очистки: /cache_clear")
+        return
+
+    if text == "/cache_clear":
+        QACache().clear()
+        send("🗑️ Кэш Q&A очищен")
+        return
+
     send("Не понял 🤔 /help")
 
 
@@ -577,6 +704,9 @@ def main():
     if missing:
         print(f"❌ Не заданы: {', '.join(missing)}")
         return
+
+    threading.Thread(target=_deadline_reminder_loop, daemon=True).start()
+    print("⏰ Напоминания о дедлайнах запущены")
 
     send("🤖 Бот запущен! /start — помощь")
     print("🤖 Ожидаю...")

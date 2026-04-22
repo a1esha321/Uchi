@@ -7,6 +7,7 @@ import json
 import re
 from groq import Groq
 from dotenv import load_dotenv
+from qa_cache import QACache
 
 load_dotenv()
 
@@ -15,6 +16,7 @@ class SmartSolver:
     def __init__(self, lecture_knowledge: str = ""):
         self.knowledge = lecture_knowledge[:25000] if lecture_knowledge else ""
         self._client = None
+        self._cache = QACache()
 
     @property
     def client(self):
@@ -46,6 +48,11 @@ class SmartSolver:
         if not options:
             return 0, 0.0
 
+        cached = self._cache.get(question, options)
+        if cached is not None:
+            print(f"  💾 Кэш: {str(cached[0])[:40]} ({int(cached[1]*100)}%)")
+            return cached
+
         opts = "\n".join([f"{i+1}. {o}" for i, o in enumerate(options)])
         context = f"Материал лекции:\n{self.knowledge}\n\n" if self.knowledge else ""
 
@@ -68,6 +75,7 @@ class SmartSolver:
             data = json.loads(raw)
             idx = min(max(0, int(data.get("answer", 1)) - 1), len(options) - 1)
             conf = max(0.0, min(1.0, float(data.get("confidence", 0.5))))
+            self._cache.set(question, options, idx, conf)
             return idx, conf
         except Exception as e:
             print(f"  ⚠️ Ошибка: {e}")
@@ -75,6 +83,11 @@ class SmartSolver:
 
     def _solve_text(self, question: str, qtype: str) -> tuple:
         """Решает вопрос с текстовым ответом."""
+        cached = self._cache.get(question, [])
+        if cached is not None:
+            print(f"  💾 Кэш: {str(cached[0])[:40]} ({int(cached[1]*100)}%)")
+            return cached
+
         context = f"Материал лекции:\n{self.knowledge}\n\n" if self.knowledge else ""
 
         if qtype == "shortanswer":
@@ -114,6 +127,7 @@ class SmartSolver:
             data = json.loads(raw)
             answer = str(data.get("answer", "")).strip()
             conf = max(0.0, min(1.0, float(data.get("confidence", 0.5))))
+            self._cache.set(question, [], answer, conf)
             return answer, conf
         except Exception as e:
             print(f"  ⚠️ Ошибка: {e}")
@@ -129,6 +143,9 @@ class SmartSolver:
             shown = str(ans)[:60] if ans else "—"
             print(f"  → {shown} ({int(conf*100)}%)")
         return answers, confidences
+
+    def cache_stats(self) -> str:
+        return self._cache.stats_line()
 
     def make_summary(self) -> str:
         if not self.knowledge:
