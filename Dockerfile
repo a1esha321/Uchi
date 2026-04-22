@@ -5,6 +5,9 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Переустанавливаем chromium чтобы версия Python-пакета совпала с бинарем
+RUN playwright install chromium
+
 COPY . .
 
 CMD ["python", "telegram_bot.py"]
