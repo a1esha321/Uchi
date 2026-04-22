@@ -1,11 +1,6 @@
 """
-debug_tool.py — инструмент для отладки и обучения навигации на сайте.
-
-Функции:
-- Заходит на любую страницу сайта
-- Делает скриншот и отправляет в Telegram
-- Присылает краткую структуру HTML (заголовки, ссылки, формы)
-- Позволяет пошагово обучать бота
+debug_tool.py — улучшенный инструмент отладки.
+Показывает реальное содержимое страницы, а не шапку сайта.
 """
 
 import os
@@ -15,7 +10,6 @@ from browser import UniBrowser
 
 
 def _send_photo(photo_path: str, caption: str = ""):
-    """Отправляет фото в Telegram."""
     token = os.getenv("TELEGRAM_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
     try:
@@ -27,11 +21,10 @@ def _send_photo(photo_path: str, caption: str = ""):
                 timeout=30
             )
     except Exception as e:
-        print(f"Ошибка отправки фото: {e}")
+        print(f"Ошибка фото: {e}")
 
 
 def _send_message(text: str):
-    """Отправляет текст в Telegram."""
     token = os.getenv("TELEGRAM_TOKEN")
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
     try:
@@ -44,15 +37,13 @@ def _send_message(text: str):
         pass
 
 
+def _escape_html(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 def debug_page(url: str):
-    """
-    Заходит на страницу и отправляет в Telegram:
-    1. Скриншот (что видит бот)
-    2. URL после перехода (вдруг редирект)
-    3. Структуру: заголовки, кнопки, формы, ссылки
-    4. HTML фрагмент главной области
-    """
-    _send_message(f"🔍 Исследую страницу: <code>{url}</code>")
+    """Заходит на страницу и отправляет в Telegram её реальное содержимое."""
+    _send_message(f"🔍 Исследую: <code>{url}</code>")
 
     bot = UniBrowser(headless=True)
     try:
@@ -64,57 +55,54 @@ def debug_page(url: str):
         current_url = bot.page.url
         title = bot.page.title()
 
-        # 1. Скриншот
+        # Скриншот
         screenshot_path = "/tmp/debug_page.png"
         bot.page.screenshot(path=screenshot_path, full_page=False)
-        _send_photo(screenshot_path, f"📸 <b>{title}</b>\n<code>{current_url}</code>")
+        _send_photo(screenshot_path, f"📸 {title[:150]}")
 
-        # 2. Структура страницы
-        info = _analyze_page(bot.page)
+        # 1. Извлекаем ТЕКСТОВОЕ содержимое главной области
+        main_text = bot.page.evaluate("""() => {
+            const main = document.querySelector(
+                '#region-main, [role="main"], .course-content, main, #page-content'
+            );
+            if (!main) return '';
+            // Удаляем скрипты и стили из копии
+            const clone = main.cloneNode(true);
+            clone.querySelectorAll('script, style, nav, header, footer').forEach(el => el.remove());
+            return clone.innerText.trim();
+        }""")
 
-        msg = f"<b>📊 Структура страницы</b>\n\n"
-        msg += f"<b>Заголовок:</b> {title}\n"
-        msg += f"<b>URL:</b> <code>{current_url}</code>\n\n"
+        if main_text:
+            _send_message(f"<b>📄 Содержимое страницы ({len(main_text)} симв):</b>\n<pre>{_escape_html(main_text[:3500])}</pre>")
+        else:
+            _send_message("⚠️ Не смог извлечь содержимое главной области")
 
-        if info["headings"]:
-            msg += f"<b>Заголовки ({len(info['headings'])}):</b>\n"
-            for h in info["headings"][:10]:
-                msg += f"  • {h}\n"
-            msg += "\n"
+        # 2. Смотрим именно секцию если URL с ?section=
+        if "section=" in current_url or "#section-" in current_url:
+            section_html = bot.page.evaluate("""() => {
+                // Ищем содержимое текущей секции
+                const section = document.querySelector(
+                    '.section.main, li.section.current, .section-item'
+                );
+                if (!section) return '';
+                const summary = section.querySelector('.summary, .content, .no-overflow');
+                if (summary) return summary.innerText.trim();
+                return section.innerText.trim().substring(0, 3000);
+            }""")
 
-        if info["buttons"]:
-            msg += f"<b>Кнопки ({len(info['buttons'])}):</b>\n"
-            for b in info["buttons"][:10]:
-                msg += f"  • {b}\n"
-            msg += "\n"
+            if section_html:
+                _send_message(f"<b>📋 Текст секции:</b>\n<pre>{_escape_html(section_html[:3500])}</pre>")
 
-        if info["forms"]:
-            msg += f"<b>Формы ввода ({len(info['forms'])}):</b>\n"
-            for f in info["forms"][:5]:
-                msg += f"  • {f}\n"
-            msg += "\n"
-
-        _send_message(msg)
-
-        # 3. Ссылки по группам
-        if info["links"]:
-            links_msg = f"<b>🔗 Ссылки на странице ({len(info['links'])})</b>\n\n"
-            for category, items in info["links_grouped"].items():
-                if items:
-                    links_msg += f"<b>{category}:</b>\n"
-                    for item in items[:5]:
-                        links_msg += f"  • {item['text'][:50]} → <code>{item['url'][:60]}</code>\n"
-                    links_msg += "\n"
-            _send_message(links_msg)
-
-        # 4. Фрагмент HTML главной области
+        # 3. HTML конкретного блока (для понимания структуры)
         main_html = bot.page.evaluate("""() => {
-            const main = document.querySelector('main, [role="main"], #region-main, .main-content, body');
-            return main ? main.outerHTML.substring(0, 3000) : '';
+            const main = document.querySelector(
+                '#region-main .summary, .course-content .summary, .section .summary, #intro, .box.generalbox'
+            );
+            return main ? main.outerHTML.substring(0, 2500) : '';
         }""")
 
         if main_html:
-            _send_message(f"<b>💻 HTML главной области (первые 3000 символов):</b>\n<pre>{_escape_html(main_html[:2000])}</pre>")
+            _send_message(f"<b>💻 HTML блока с описанием:</b>\n<pre>{_escape_html(main_html[:2500])}</pre>")
 
     except Exception as e:
         _send_message(f"❌ Ошибка: <code>{str(e)[:500]}</code>")
@@ -122,80 +110,8 @@ def debug_page(url: str):
         bot.close()
 
 
-def _analyze_page(page) -> dict:
-    """Анализирует страницу и возвращает её структуру."""
-    result = {
-        "headings": [],
-        "buttons": [],
-        "forms": [],
-        "links": [],
-        "links_grouped": {},
-    }
-
-    # Заголовки h1-h3
-    for h in page.query_selector_all("h1, h2, h3"):
-        text = h.inner_text().strip()
-        if text:
-            result["headings"].append(text[:80])
-
-    # Кнопки
-    for b in page.query_selector_all('button, input[type="submit"], input[type="button"]'):
-        text = (b.inner_text() or b.get_attribute("value") or "").strip()
-        if text:
-            result["buttons"].append(text[:60])
-
-    # Поля форм
-    for inp in page.query_selector_all('input[type="text"], input[type="password"], textarea, select'):
-        name = inp.get_attribute("name") or inp.get_attribute("id") or "без имени"
-        placeholder = inp.get_attribute("placeholder") or ""
-        inp_type = inp.get_attribute("type") or inp.evaluate("el => el.tagName")
-        info = f"{name} ({inp_type})"
-        if placeholder:
-            info += f" — {placeholder[:30]}"
-        result["forms"].append(info)
-
-    # Ссылки — группируем по типу
-    grouped = {
-        "Тесты (/mod/quiz)": [],
-        "Задания (/mod/assign)": [],
-        "Курсы (/course)": [],
-        "Видео/МТС (мts-link)": [],
-        "Личный кабинет (/my)": [],
-        "Другие": [],
-    }
-
-    for a in page.query_selector_all("a[href]"):
-        href = a.get_attribute("href") or ""
-        text = a.inner_text().strip() or a.get_attribute("title") or ""
-        if not href or href.startswith("#") or href.startswith("javascript"):
-            continue
-
-        link_info = {"text": text[:60], "url": href}
-        result["links"].append(link_info)
-
-        # Категоризация
-        if "/mod/quiz/" in href:
-            grouped["Тесты (/mod/quiz)"].append(link_info)
-        elif "/mod/assign/" in href:
-            grouped["Задания (/mod/assign)"].append(link_info)
-        elif "/course/view" in href:
-            grouped["Курсы (/course)"].append(link_info)
-        elif "mts-link" in href or "webinar.ru" in href:
-            grouped["Видео/МТС (мts-link)"].append(link_info)
-        elif "/my/" in href:
-            grouped["Личный кабинет (/my)"].append(link_info)
-        else:
-            grouped["Другие"].append(link_info)
-
-    result["links_grouped"] = grouped
-    return result
-
-
 def debug_test_page(url: str):
-    """
-    Специализированная отладка страницы теста.
-    Отправляет в Telegram всю информацию о вопросах: HTML, классы, структуру.
-    """
+    """Специализированная отладка страницы теста."""
     _send_message(f"🧪 Отладка теста: <code>{url}</code>")
 
     bot = UniBrowser(headless=True)
@@ -205,73 +121,87 @@ def debug_test_page(url: str):
         bot.page.wait_for_load_state("networkidle")
         time.sleep(3)
 
-        # Попытаться начать тест
-        if bot.start_quiz():
-            time.sleep(2)
+        # Определяем состояние теста
+        state_info = bot.page.evaluate("""() => {
+            const info = {};
+            
+            // Кнопки на странице
+            const buttons = [...document.querySelectorAll('button, input[type="submit"], a.btn')];
+            info.buttons = buttons.map(b => (b.innerText || b.value || '').trim()).filter(t => t);
+            
+            // Есть ли оценка?
+            const gradeEl = document.querySelector('.generaltable .c1, [class*="grade"]');
+            info.hasGrade = !!gradeEl;
+            
+            // Количество вопросов на странице
+            info.questions = document.querySelectorAll('.que').length;
+            
+            return info;
+        }""")
 
-        # Скриншот
+        # Если тест ещё не начат — пытаемся начать
+        if state_info["questions"] == 0:
+            _send_message(
+                f"<b>📋 Страница превью теста</b>\n"
+                f"Кнопки: {', '.join(state_info['buttons'][:10])}\n\n"
+                f"Пробую нажать 'Начать тестирование' или 'Продолжить попытку'..."
+            )
+
+            # Пробуем разные кнопки
+            for btn_text in ["Продолжить текущую попытку", "Начать тестирование", "Начать новую попытку"]:
+                btn = bot.page.query_selector(f'button:has-text("{btn_text}"), a:has-text("{btn_text}"), input[value="{btn_text}"]')
+                if btn:
+                    _send_message(f"✅ Нажимаю: {btn_text}")
+                    btn.click()
+                    bot.page.wait_for_load_state("networkidle")
+                    time.sleep(2)
+                    # Подтверждение "Начать попытку" если есть
+                    confirm = bot.page.query_selector('button:has-text("Начать попытку"), input[value="Начать попытку"]')
+                    if confirm:
+                        confirm.click()
+                        bot.page.wait_for_load_state("networkidle")
+                        time.sleep(2)
+                    break
+
+        # Теперь делаем скриншот (возможно с вопросами)
         screenshot_path = "/tmp/debug_test.png"
         bot.page.screenshot(path=screenshot_path, full_page=True)
         _send_photo(screenshot_path, "📸 Страница теста")
 
-        # Анализируем структуру вопросов
+        # Анализируем вопросы
         analysis = bot.page.evaluate("""() => {
-            // Ищем все возможные контейнеры вопросов
-            const selectors = ['.que', '.question', '[class*="question"]', '.quiz-question', 'fieldset'];
-            let results = [];
+            const questions = document.querySelectorAll('.que');
+            if (questions.length === 0) return 'Вопросы не найдены';
             
-            for (const sel of selectors) {
-                const elements = document.querySelectorAll(sel);
-                if (elements.length > 0) {
-                    results.push(`${sel}: ${elements.length} элементов`);
-                    // Берём первый элемент и анализируем его структуру
-                    const first = elements[0];
-                    const classes = first.className;
-                    const inputs = first.querySelectorAll('input');
-                    const labels = first.querySelectorAll('label');
-                    
-                    results.push(`  Классы: ${classes}`);
-                    results.push(`  Inputs: ${inputs.length}`);
-                    results.push(`  Labels: ${labels.length}`);
-                    
-                    // HTML первого вопроса
-                    if (first.outerHTML) {
-                        results.push(`  HTML (500 симв): ${first.outerHTML.substring(0, 500)}`);
-                    }
-                    break;
-                }
-            }
+            const first = questions[0];
+            const type = first.className.match(/que\s+(\w+)/);
+            const qtext = first.querySelector('.qtext');
+            const qtextStr = qtext ? qtext.innerText.trim() : 'нет текста';
             
-            if (results.length === 0) {
-                results.push('Контейнеры вопросов не найдены');
-                // Показываем что есть на странице
-                results.push(`Total inputs: ${document.querySelectorAll('input').length}`);
-                results.push(`Total labels: ${document.querySelectorAll('label').length}`);
-                results.push(`Total fieldsets: ${document.querySelectorAll('fieldset').length}`);
-            }
+            // Типы input
+            const radios = first.querySelectorAll('input[type="radio"]').length;
+            const checkboxes = first.querySelectorAll('input[type="checkbox"]').length;
+            const textInputs = first.querySelectorAll('input[type="text"]').length;
+            const textareas = first.querySelectorAll('textarea').length;
+            const selects = first.querySelectorAll('select').length;
             
-            return results.join('\\n');
+            // Варианты ответов
+            const labels = [...first.querySelectorAll('.answer label, .r0 label, .r1 label')];
+            const options = labels.map(l => l.innerText.trim()).filter(t => t);
+            
+            return {
+                total: questions.length,
+                type: type ? type[1] : 'unknown',
+                question: qtextStr.substring(0, 300),
+                inputs: {radios, checkboxes, textInputs, textareas, selects},
+                options: options.slice(0, 6)
+            };
         }""")
 
-        _send_message(f"<b>🔍 Анализ структуры теста:</b>\n<pre>{_escape_html(analysis)}</pre>")
-
-        # Пробуем извлечь текст первого вопроса любым способом
-        first_question_html = bot.page.evaluate("""() => {
-            const q = document.querySelector('.que, .question, [class*="question"], fieldset');
-            return q ? q.outerHTML.substring(0, 2000) : 'Вопрос не найден';
-        }""")
-
-        _send_message(f"<b>📝 HTML первого вопроса:</b>\n<pre>{_escape_html(first_question_html[:2000])}</pre>")
+        import json
+        _send_message(f"<b>🔍 Анализ вопросов:</b>\n<pre>{_escape_html(json.dumps(analysis, ensure_ascii=False, indent=2))}</pre>")
 
     except Exception as e:
         _send_message(f"❌ Ошибка: <code>{str(e)[:500]}</code>")
     finally:
         bot.close()
-
-
-def _escape_html(text: str) -> str:
-    """Экранирует HTML для отправки в Telegram."""
-    return (text
-            .replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;"))
