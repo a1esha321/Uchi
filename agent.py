@@ -136,9 +136,11 @@ class SubjectAgent:
 
             if result == "approve":
                 bot.submit_quiz()
+                grade = bot.get_quiz_grade()
                 self.registry.set_quiz_status(s.subject_id, quiz_url, "done")
                 self.stats.record_quiz(s.subject_id, "passed")
-                self.tg.notify(f"✅ Тест сдан: <b>{s.name}</b>")
+                grade_str = f"\nОценка: <b>{grade}</b>" if grade else ""
+                self.tg.notify(f"✅ Тест сдан: <b>{s.name}</b>{grade_str}")
             else:
                 self.stats.record_quiz(s.subject_id, "skipped")
                 self.tg.notify(f"⏭ Тест пропущен: <b>{s.name}</b>")
