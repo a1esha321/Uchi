@@ -48,15 +48,22 @@ class UniBrowser:
         if not login_val or not password_val:
             raise ValueError("UNI_LOGIN или UNI_PASSWORD не заданы")
 
-        self.page.goto(f"{self.base_url}/login/index.php", timeout=60000)
+        self._do_login(f"{self.base_url}/login/index.php")
+
+    def _do_login(self, login_url: str):
+        """Внутренний метод: открывает страницу логина и вводит credentials."""
+        login_val = os.getenv("UNI_LOGIN")
+        password_val = os.getenv("UNI_PASSWORD")
+
+        self.page.goto(login_url, timeout=60000)
         self.page.wait_for_load_state("networkidle")
 
-        # Ждём появления поля логина — форма может рендериться JS
+        # Ждём появления поля логина (форма может рендериться JS)
         try:
             self.page.wait_for_selector(
                 'input[name="username"], input[id="username"], '
                 'input[type="email"], input[name="login"], input[name="j_username"]',
-                timeout=10000,
+                timeout=8000,
             )
         except Exception:
             pass
@@ -68,6 +75,13 @@ class UniBrowser:
             self.page.query_selector('input[name="login"]') or
             self.page.query_selector('input[name="j_username"]')
         )
+
+        # Moodle с SSO: форма видна только по ?loginpage=1
+        if not username_field and "loginpage=1" not in login_url:
+            print("  ℹ️ Форма логина не найдена, пробую ?loginpage=1 ...")
+            self._do_login(login_url.split("?")[0] + "?loginpage=1")
+            return
+
         password_field = (
             self.page.query_selector('input[name="password"]') or
             self.page.query_selector('input[id="password"]') or
