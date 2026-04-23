@@ -570,6 +570,72 @@ class UniBrowser:
 
         return deadlines
 
+    def debug_dump_page(self, url: str) -> dict:
+        """
+        Открывает страницу и собирает всё что может быть активностью/тестом/заданием.
+        Возвращает отчёт для ручного анализа селекторов.
+        """
+        self.page.goto(url, timeout=30000)
+        self.page.wait_for_load_state("networkidle", timeout=15000)
+        time.sleep(2)
+
+        report = {
+            "url": url,
+            "final_url": self.page.url,
+            "title": self.page.title(),
+            "h1_texts": [],
+            "h2_texts": [],
+            "all_links": [],
+            "buttons": [],
+            "iframes": [],
+            "candidate_activities": [],
+        }
+
+        for h in self.page.query_selector_all("h1"):
+            t = h.inner_text().strip()
+            if t:
+                report["h1_texts"].append(t[:200])
+
+        for h in self.page.query_selector_all("h2"):
+            t = h.inner_text().strip()
+            if t:
+                report["h2_texts"].append(t[:200])
+
+        for link in self.page.query_selector_all("a[href]"):
+            href = link.get_attribute("href") or ""
+            text = (link.inner_text() or "").strip()
+            classes = link.get_attribute("class") or ""
+            if text or href:
+                report["all_links"].append({
+                    "text": text[:150],
+                    "href": href[:300],
+                    "class": classes[:200],
+                })
+
+        for btn in self.page.query_selector_all("button"):
+            text = (btn.inner_text() or "").strip()
+            classes = btn.get_attribute("class") or ""
+            if text:
+                report["buttons"].append({
+                    "text": text[:150],
+                    "class": classes[:200],
+                })
+
+        for frame in self.page.query_selector_all("iframe"):
+            src = frame.get_attribute("src") or ""
+            report["iframes"].append(src[:300])
+
+        keywords = [
+            "тест", "test", "quiz", "задание", "assignment",
+            "лекция", "lecture", "модуль", "module", "урок", "lesson",
+        ]
+        for link in report["all_links"]:
+            combined = (link["text"] + " " + link["href"] + " " + link["class"]).lower()
+            if any(kw in combined for kw in keywords):
+                report["candidate_activities"].append(link)
+
+        return report
+
     def close(self):
         try:
             self.context.close()

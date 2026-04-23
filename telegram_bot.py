@@ -20,6 +20,7 @@ telegram_bot.py — главная точка входа.
   /teachers       — список преподавателей
   /debug <url>    — отладка страницы
   /debug_test <url> — отладка теста
+  /debug_course <url> — дамп курса для анализа селекторов
   /add Имя|id|минуты — добавить предмет вручную
 """
 
@@ -285,6 +286,14 @@ except RuntimeError as _km_err:
 quiz_states: dict = {}
 
 
+def _run_with_error_notify(fn):
+    """Запускает fn(), при исключении шлёт ошибку в Telegram."""
+    try:
+        fn()
+    except Exception as e:
+        send(f"❌ Ошибка: {e}")
+
+
 def refresh_registry():
     """Перечитывает реестр с диска (важно после /scan в фоновом потоке)."""
     global registry
@@ -334,6 +343,53 @@ def handle_message(message: dict):
         return
 
     # ── Debug ──
+    if text.startswith("/debug_course"):
+        url = text[len("/debug_course"):].strip()
+        if not url:
+            send(
+                "Использование: <code>/debug_course &lt;ссылка&gt;</code>\n"
+                "Пример: <code>/debug_course https://online.fa.ru/course/view.php?id=12345</code>"
+            )
+            return
+        if not url.startswith("http"):
+            send("⚠️ Нужна полная ссылка, начиная с https://")
+            return
+
+        send("🔍 Открываю страницу и собираю дамп...")
+
+        def _dump():
+            import json as _json
+            base = "https://online.fa.ru" if "online.fa.ru" in url else None
+            bot_browser = UniBrowser(headless=True, base_url=base)
+            try:
+                bot_browser.login()
+                report = bot_browser.debug_dump_page(url)
+            finally:
+                bot_browser.close()
+
+            path = f"/tmp/debug_report_{int(time.time())}.json"
+            with open(path, "w", encoding="utf-8") as f:
+                _json.dump(report, f, ensure_ascii=False, indent=2)
+
+            summary = (
+                f"✅ <b>Дамп готов</b>\n\n"
+                f"📄 Title: {report['title'][:100]}\n"
+                f"🔗 Final URL: {report['final_url'][:120]}\n"
+                f"H1: {len(report['h1_texts'])} | H2: {len(report['h2_texts'])}\n"
+                f"Ссылок: {len(report['all_links'])}\n"
+                f"Кнопок: {len(report['buttons'])}\n"
+                f"iframes: {len(report['iframes'])}\n"
+                f"🎯 Кандидатов в активности: {len(report['candidate_activities'])}"
+            )
+            send(summary)
+            send_document(path, "📦 Полный дамп страницы (JSON)")
+
+        threading.Thread(
+            target=lambda: _run_with_error_notify(_dump),
+            daemon=True
+        ).start()
+        return
+
     if text.startswith("/debug_test "):
         url = text[12:].strip()
         if url:
@@ -383,7 +439,8 @@ def handle_message(message: dict):
             "/cache — статистика кэша Q&A\n"
             "/export <i>id</i> — конспекты\n"
             "/teachers — преподаватели\n"
-            "/debug <i>url</i> — отладка\n"
+            "/debug <i>url</i> — отладка страницы\n"
+            "/debug_course <i>url</i> — дамп курса (JSON)\n"
             "/help — подробнее"
         )
         return
