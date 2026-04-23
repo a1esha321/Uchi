@@ -277,6 +277,15 @@ def _detect_semester(course_name: str) -> str:
     return m.group(1) if m else ""
 
 
+def _detect_group_year(course_name: str) -> str:
+    """
+    Парсит год набора из кода группы: ДИРПО25-1 → '25', ЭФДО24-2 → '24'.
+    Используется для фильтрации курсов разных лет обучения.
+    """
+    m = re.search(r'[А-ЯЁA-Z]{2,}(\d{2})-\d', course_name)
+    return m.group(1) if m else ""
+
+
 # ─── Сканирование всех курсов ─────────────────────────────────
 
 ONLINE_FA_URL = "https://online.fa.ru"
@@ -293,7 +302,12 @@ def scan_all_courses(current_semester: str = "2"):
     registry = SubjectRegistry()
     teachers = TeacherRegistry()
 
-    tg.notify(f"🔍 Сканирую курсы (текущий семестр: {current_semester})")
+    group_year = os.getenv("GROUP_YEAR", "").strip()  # напр. "25" для ДИРПО25
+
+    filter_info = f"семестр: {current_semester}"
+    if group_year:
+        filter_info += f", год набора: {group_year}"
+    tg.notify(f"🔍 Сканирую курсы ({filter_info})")
 
     bot = UniBrowser(headless=True)
     stats = {
@@ -336,11 +350,20 @@ def scan_all_courses(current_semester: str = "2"):
 
             subject.course_url = url  # сохраняем для /tasks
 
-            # Определяем семестр
+            # Определяем семестр и год набора группы
             semester = _detect_semester(name)
             subject.semester = semester
+            course_group_year = _detect_group_year(name)
 
-            # Помечаем сданный если другой семестр
+            # Фильтр по году набора (GROUP_YEAR): курсы других лет → сданы
+            if group_year and course_group_year and course_group_year != group_year:
+                subject.completed = True
+                stats["old_semester"] += 1
+                registry._save()
+                print(f"  ⏭ {name} — группа {course_group_year}, мой год {group_year}, пропускаю")
+                continue
+
+            # Фильтр по семестру: другой семестр → сдан
             if semester and semester != current_semester:
                 subject.completed = True
                 stats["old_semester"] += 1

@@ -502,10 +502,13 @@ def handle_message(message: dict):
         quizzes_done = sum(1 for s in subject.quiz_status.values() if s == "done")
         assignments_done = sum(1 for s in subject.assignment_status.values() if s in ("submitted", "graded"))
 
+        from agent import _detect_group_year
+        group_year = _detect_group_year(subject.name)
         text_out = (
             f"<b>📚 {subject.name}</b>\n\n"
             f"ID: <code>{subject.subject_id}</code>\n"
-            f"Семестр: {subject.semester or '?'}\n"
+            f"Семестр: {subject.semester or '?'}"
+            + (f"  |  Год набора группы: <b>{group_year}</b>" if group_year else "") + "\n"
         )
         if flags:
             text_out += f"Флаги: {', '.join(flags)}\n"
