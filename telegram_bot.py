@@ -2,24 +2,30 @@
 telegram_bot.py — главная точка входа.
 
 Команды:
-  /start        — помощь
-  /scan         — сканировать все курсы (семестр из SEMESTER env, по умолчанию 2)
-  /subjects     — список предметов (с флагами)
-  /course <id>  — карточка конкретного курса
-  /upcoming     — ближайшие дедлайны
-  /quizzes      — пройти все тесты (с подтверждением)
-  /assignments  — выполнить все задания (с подтверждением)
-  /preview <url>— dry-run теста/задания (решить но не отправлять)
-  /stats        — статистика работы бота
-  /export <id>  — экспорт конспектов предмета
-  /teachers     — список преподавателей
-  /debug URL    — отладка страницы
-  /debug_test URL — отладка теста
+  /start          — помощь
+  /scan           — сканировать campus.fa.ru (семестр из SEMESTER env)
+  /scan_online    — сканировать online.fa.ru
+  /subjects       — список предметов (с флагами)
+  /course <id>    — карточка конкретного курса
+  /upcoming       — дедлайны из календаря Moodle
+  /reminders      — предстоящие дедлайны с таймером
+  /quizzes        — пройти все тесты (с подтверждением)
+  /assignments    — выполнить все задания (с подтверждением)
+  /preview <url>  — dry-run теста/задания (решить но не отправлять)
+  /learn          — микро-квиз по теме с низкой уверенностью
+  /map            — карта знаний: слабые и сильные темы
+  /stats          — статистика работы бота
+  /cache          — статистика кэша Q&A
+  /export <id>    — экспорт конспектов предмета
+  /teachers       — список преподавателей
+  /debug <url>    — отладка страницы
+  /debug_test <url> — отладка теста
   /add Имя|id|минуты — добавить предмет вручную
 """
 
 import os
 import re
+import random
 import time
 import threading
 import queue
@@ -36,6 +42,7 @@ from agent import (
 )
 from debug_tool import debug_page, debug_test_page
 from qa_cache import QACache
+from reactor_core import KnowledgeMirror
 
 load_dotenv()
 
@@ -268,6 +275,15 @@ def _deadline_reminder_loop():
 registry = SubjectRegistry()
 pending = {}
 
+try:
+    km = KnowledgeMirror()
+except RuntimeError as _km_err:
+    km = None
+    print(f"⚠️ KnowledgeMirror не инициализирован: {_km_err}")
+
+# chat_id → {'subject_id', 'topic', 'correct_answer', 'start_time'}
+quiz_states: dict = {}
+
 
 def refresh_registry():
     """Перечитывает реестр с диска (важно после /scan в фоновом потоке)."""
@@ -288,6 +304,27 @@ def handle_message(message: dict):
     links = extract_links(message)
     is_forward = any(k in message for k in ("forward_date", "forward_from", "forward_origin"))
     chat_id = str(message["chat"]["id"])
+
+    # ── Ответ на микро-квиз (/learn) ──
+    if chat_id in quiz_states and not text.startswith("/"):
+        if km:
+            state = quiz_states.pop(chat_id)
+            def _eval():
+                is_correct = km.evaluate_user_answer(text, state["correct_answer"])
+                km.update_confidence(state["subject_id"], state["topic"], is_correct)
+                km.log_session(
+                    state["subject_id"], state["topic"],
+                    state["start_time"], datetime.now(), is_correct,
+                )
+                if is_correct:
+                    send("✅ Верно! Уверенность по теме повышена.")
+                else:
+                    send(
+                        f"❌ Не совсем.\n\n"
+                        f"<b>Эталон:</b> <i>{state['correct_answer'][:400]}</i>"
+                    )
+            threading.Thread(target=_eval, daemon=True).start()
+        return
 
     # ── Debug ──
     if text.startswith("/debug_test "):
@@ -330,6 +367,9 @@ def handle_message(message: dict):
             "/reminders — мои дедлайны (с таймером)\n"
             "/quizzes — пройти все тесты\n"
             "/assignments — все задания\n\n"
+            "<b>Знания:</b>\n"
+            "/learn — микро-квиз по слабой теме\n"
+            "/map — карта знаний (сильные/слабые темы)\n\n"
             "<b>Дополнительно:</b>\n"
             "/preview <i>url</i> — dry-run\n"
             "/stats — статистика\n"
@@ -570,6 +610,62 @@ def handle_message(message: dict):
         pending[chat_id] = {"type": "webinar", "url": webinar_url}
         send("🔗 Ссылка на эфир. Какой предмет?",
              keyboard=subject_keyboard("webinar"))
+        return
+
+    if text == "/learn":
+        if not km:
+            send("⚠️ KnowledgeMirror недоступен — проверь GROQ_API_KEY")
+            return
+        refresh_registry()
+        weak = km.get_weak_topics()
+
+        if weak:
+            subject_id, topic, conf = random.choice(weak)
+            subject = registry.get(subject_id)
+            subject_name = subject.name if subject else subject_id
+        else:
+            subjects_with_notes = [s for s in registry.all() if s.notes_files]
+            if not subjects_with_notes:
+                send("🎓 Пока нет конспектов для квиза. Посети хотя бы одну лекцию.")
+                return
+            subject = random.choice(subjects_with_notes)
+            subject_id = subject.subject_id
+            subject_name = subject.name
+            topic = subject.name
+
+        subject_obj = registry.get(subject_id)
+        context = subject_obj.get_context_for_topic(topic) if subject_obj else ""
+        if not context:
+            send(f"⚠️ По предмету «{subject_name}» пока нет конспектов.")
+            return
+
+        send(f"🧠 Генерирую вопрос по теме <b>{topic}</b>...")
+
+        def _generate():
+            question, answer = km.generate_micro_quiz(subject_name, topic, context)
+            if not answer:
+                send("⚠️ Не удалось сгенерировать вопрос, попробуй ещё раз.")
+                return
+            quiz_states[chat_id] = {
+                "subject_id": subject_id,
+                "topic": topic,
+                "correct_answer": answer,
+                "start_time": datetime.now(),
+            }
+            send(
+                f"🎓 <b>{subject_name}</b>\n\n"
+                f"{question}\n\n"
+                f"<i>Ответь следующим сообщением.</i>"
+            )
+
+        threading.Thread(target=_generate, daemon=True).start()
+        return
+
+    if text == "/map":
+        if not km:
+            send("⚠️ KnowledgeMirror недоступен — проверь GROQ_API_KEY")
+            return
+        send(km.get_knowledge_summary())
         return
 
     if text == "/reminders":

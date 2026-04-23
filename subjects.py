@@ -67,6 +67,11 @@ class Subject:
         if filepath not in self.notes_files:
             self.notes_files.append(filepath)
 
+    def get_context_for_topic(self, topic: str = "") -> str:
+        """Возвращает конспект предмета, обрезанный до 3000 символов.
+        Фильтрация по теме — в будущем; сейчас отдаём полный конспект."""
+        return self.get_full_knowledge()[:3000]
+
 
 class SubjectRegistry:
     def __init__(self):
