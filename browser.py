@@ -1,5 +1,5 @@
 """
-browser.py — управление браузером для campus.fa.ru (Moodle).
+browser.py — управление браузером для Moodle-платформ (campus.fa.ru, online.fa.ru).
 С поддержкой shortanswer-тестов, определением состояния и парсингом требований.
 """
 
@@ -23,7 +23,10 @@ EXTERNAL_DOMAINS = [
 
 
 class UniBrowser:
-    def __init__(self, headless: bool = True):
+    def __init__(self, headless: bool = True, base_url: str = None):
+        raw = base_url or os.getenv("UNI_URL", "https://campus.fa.ru")
+        self.base_url = raw.split("/login")[0].rstrip("/")
+
         self.playwright = sync_playwright().start()
         self.browser = self.playwright.chromium.launch(
             headless=headless,
@@ -39,14 +42,13 @@ class UniBrowser:
     # ─── Авторизация ──────────────────────────────────────────
 
     def login(self):
-        uni_url = os.getenv("UNI_URL", "https://campus.fa.ru/login/index.php")
         login_val = os.getenv("UNI_LOGIN")
         password_val = os.getenv("UNI_PASSWORD")
 
         if not login_val or not password_val:
             raise ValueError("UNI_LOGIN или UNI_PASSWORD не заданы")
 
-        self.page.goto(uni_url, timeout=60000)
+        self.page.goto(f"{self.base_url}/login/index.php", timeout=60000)
         self.page.wait_for_load_state("networkidle")
 
         username_field = (
@@ -88,14 +90,11 @@ class UniBrowser:
 
     def get_my_courses(self) -> list:
         """Собирает список курсов со всех страниц."""
-        uni_url = os.getenv("UNI_URL", "https://campus.fa.ru")
-        base = uni_url.split("/login")[0].rstrip("/")
-
         all_courses = {}
         urls_to_scan = [
-            f"{base}/my/courses.php",
-            f"{base}/my/",
-            f"{base}/",
+            f"{self.base_url}/my/courses.php",
+            f"{self.base_url}/my/",
+            f"{self.base_url}/",
         ]
 
         for url in urls_to_scan:
@@ -549,11 +548,8 @@ class UniBrowser:
 
     def get_upcoming_deadlines(self) -> list:
         """Читает календарь и возвращает предстоящие дедлайны."""
-        uni_url = os.getenv("UNI_URL", "https://campus.fa.ru")
-        base = uni_url.split("/login")[0].rstrip("/")
-
         try:
-            self.page.goto(f"{base}/calendar/view.php?view=upcoming", timeout=60000)
+            self.page.goto(f"{self.base_url}/calendar/view.php?view=upcoming", timeout=60000)
             self.page.wait_for_load_state("networkidle")
             time.sleep(2)
         except Exception:

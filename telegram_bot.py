@@ -30,9 +30,9 @@ from dotenv import load_dotenv
 
 from subjects import SubjectRegistry, Subject, TeacherRegistry, Stats
 from agent import (
-    SubjectAgent, scan_all_courses,
+    SubjectAgent, scan_all_courses, scan_online_fa_courses,
     run_all_assignments, run_all_quizzes,
-    get_upcoming_deadlines,
+    get_upcoming_deadlines, ONLINE_FA_URL,
 )
 from debug_tool import debug_page, debug_test_page
 from qa_cache import QACache
@@ -322,7 +322,8 @@ def handle_message(message: dict):
         send(
             "👋 <b>Агент для заочного обучения</b>\n\n"
             "<b>Основные:</b>\n"
-            "/scan — просканировать все курсы\n"
+            "/scan — просканировать campus.fa.ru\n"
+            "/scan_online — просканировать online.fa.ru\n"
             "/subjects — список предметов\n"
             "/course <i>id</i> — карточка курса\n"
             "/upcoming — дедлайны из календаря\n"
@@ -366,7 +367,9 @@ def handle_message(message: dict):
             flags = []
             if s.completed:
                 flags.append("✅ сдано")
-            if s.external_platform:
+            if s.source_platform == ONLINE_FA_URL:
+                flags.append("🌐 online.fa.ru")
+            elif s.external_platform:
                 flags.append("🔗 внешний")
             if s.needs_enrollment:
                 flags.append("📝 нужна запись")
@@ -389,7 +392,8 @@ def handle_message(message: dict):
 
         flags = []
         if subject.completed: flags.append("✅ Сдано")
-        if subject.external_platform: flags.append("🔗 Внешняя платформа")
+        if subject.source_platform == ONLINE_FA_URL: flags.append("🌐 online.fa.ru")
+        elif subject.external_platform: flags.append("🔗 Внешняя платформа")
         if subject.needs_enrollment: flags.append("📝 Нужна запись")
 
         knowledge = subject.get_full_knowledge()
@@ -424,9 +428,18 @@ def handle_message(message: dict):
 
     if text == "/scan":
         current_semester = os.getenv("SEMESTER", "2")
-        send(f"🔍 Сканирую (семестр: {current_semester})...")
+        send(f"🔍 Сканирую campus.fa.ru (семестр: {current_semester})...")
         threading.Thread(
             target=lambda: scan_all_courses(current_semester=current_semester),
+            daemon=True
+        ).start()
+        return
+
+    if text == "/scan_online":
+        current_semester = os.getenv("SEMESTER", "2")
+        send("🌐 Сканирую online.fa.ru...")
+        threading.Thread(
+            target=lambda: scan_online_fa_courses(current_semester=current_semester),
             daemon=True
         ).start()
         return

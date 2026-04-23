@@ -26,6 +26,11 @@ class SubjectAgent:
         self.tg = TelegramNotifier()
         self.stats = Stats()
 
+    def _make_browser(self) -> UniBrowser:
+        """Создаёт браузер для платформы предмета (campus или online.fa.ru)."""
+        base_url = self.subject.source_platform or None
+        return UniBrowser(headless=True, base_url=base_url)
+
     # ─── Лекция ────────────────────────────────────────────────
 
     def run_lecture(self, event_id: str = None, webinar_url: str = None):
@@ -85,7 +90,7 @@ class SubjectAgent:
         solver = SmartSolver(context)
 
         self.tg.notify(f"📝 Открываю тест: <b>{s.name}</b>")
-        bot = UniBrowser(headless=True)
+        bot = self._make_browser()
 
         try:
             bot.login()
@@ -172,7 +177,7 @@ class SubjectAgent:
         essay_solver = EssaySolver(context)
 
         self.tg.notify(f"✍️ Открываю задание: <b>{s.name}</b>")
-        bot = UniBrowser(headless=True)
+        bot = self._make_browser()
 
         try:
             bot.login()
@@ -262,12 +267,15 @@ def _detect_semester(course_name: str) -> str:
 
 # ─── Сканирование всех курсов ─────────────────────────────────
 
+ONLINE_FA_URL = "https://online.fa.ru"
+
+
 def scan_all_courses(current_semester: str = "2"):
     """
-    Сканирует все курсы. Отмечает:
-    - external_platform — если в описании есть ссылка на online.fa.ru
+    Сканирует campus.fa.ru. Отмечает:
+    - source_platform = online.fa.ru — если курс там (обрабатывается, не пропускается)
+    - external_platform — если курс на Stepik/Coursera/etc. (пропускается)
     - completed — если курс не текущего семестра
-    - сохраняет требования, преподавателя, тесты, задания
     """
     tg = TelegramNotifier()
     registry = SubjectRegistry()
@@ -359,17 +367,33 @@ def scan_all_courses(current_semester: str = "2"):
                 # Проверяем внешние ссылки
                 external_links = info.get("external_links", [])
                 if external_links:
-                    subject.external_platform = True
-                    subject.external_url = external_links[0]
-                    stats["external"] += 1
-                    tg.notify(
-                        f"🔗 <b>{subject.name}</b>\n"
-                        f"Курс на внешней платформе:\n"
-                        f"<code>{external_links[0][:80]}</code>\n"
-                        f"Помечен как external — бот пропускает"
-                    )
-                    registry._save()
-                    continue
+                    online_links = [l for l in external_links if "online.fa.ru" in l]
+                    other_links = [l for l in external_links if "online.fa.ru" not in l]
+
+                    if online_links:
+                        # online.fa.ru — тоже Moodle, бот умеет работать там
+                        subject.source_platform = ONLINE_FA_URL
+                        subject.external_url = online_links[0]
+                        subject.external_platform = False
+                        tg.notify(
+                            f"🌐 <b>{subject.name}</b>\n"
+                            f"Курс на online.fa.ru — добавлен в очередь сканирования"
+                        )
+                        registry._save()
+                        # Курс будет просканирован через scan_online_fa_courses()
+                        continue
+                    elif other_links:
+                        subject.external_platform = True
+                        subject.external_url = other_links[0]
+                        stats["external"] += 1
+                        tg.notify(
+                            f"🔗 <b>{subject.name}</b>\n"
+                            f"Курс на неподдерживаемой платформе:\n"
+                            f"<code>{other_links[0][:80]}</code>\n"
+                            f"Помечен как external — бот пропускает"
+                        )
+                        registry._save()
+                        continue
 
                 # Собираем активности
                 activities = bot.get_course_activities()
@@ -389,12 +413,18 @@ def scan_all_courses(current_semester: str = "2"):
             except Exception as e:
                 print(f"  ⚠️ [{name}]: {e}")
 
+        # Считаем предметы на online.fa.ru
+        online_count = sum(
+            1 for s in registry.all()
+            if s.source_platform == ONLINE_FA_URL and not s.completed
+        )
         tg.notify(
-            f"✅ <b>Сканирование завершено</b>\n\n"
+            f"✅ <b>Сканирование campus.fa.ru завершено</b>\n\n"
             f"Курсов: <b>{stats['courses']}</b>\n"
             f"Активных (сем. {current_semester}): <b>{stats['active']}</b>\n"
             f"Сдано (другой семестр): <b>{stats['old_semester']}</b>\n"
-            f"Внешние платформы: <b>{stats['external']}</b>\n"
+            f"Внешние (Stepik/etc.): <b>{stats['external']}</b>\n"
+            f"На online.fa.ru: <b>{online_count}</b> — используй /scan_online\n"
             f"С требованиями преподавателя: <b>{stats['with_req']}</b>\n"
             f"Тестов: <b>{stats['quizzes']}</b>\n"
             f"Заданий: <b>{stats['assignments']}</b>"
@@ -420,8 +450,97 @@ def run_all_quizzes(dry_run: bool = False):
             SubjectAgent(subject).run_quizzes(dry_run=dry_run)
 
 
+def scan_online_fa_courses(current_semester: str = "2"):
+    """
+    Сканирует курсы на online.fa.ru для предметов, у которых source_platform = ONLINE_FA_URL.
+    Находит тесты и задания, сохраняет в реестр.
+    """
+    tg = TelegramNotifier()
+    registry = SubjectRegistry()
+    teachers = TeacherRegistry()
+
+    online_subjects = [
+        s for s in registry.all()
+        if s.source_platform == ONLINE_FA_URL and not s.completed
+    ]
+
+    if not online_subjects:
+        tg.notify("ℹ️ Нет предметов на online.fa.ru. Сначала запусти /scan")
+        return
+
+    tg.notify(f"🔍 Сканирую online.fa.ru: {len(online_subjects)} предметов")
+
+    bot = UniBrowser(headless=True, base_url=ONLINE_FA_URL)
+    stats = {"quizzes": 0, "assignments": 0, "errors": 0}
+
+    try:
+        bot.login()
+
+        for subject in online_subjects:
+            try:
+                # Если есть прямая ссылка на курс — идём туда
+                course_url = subject.external_url
+                if not course_url:
+                    print(f"  ⚠️ [{subject.name}] Нет ссылки на online.fa.ru, пропускаю")
+                    continue
+
+                bot.goto(course_url)
+
+                # Обновляем название и требования
+                info = bot.get_course_info()
+                if info.get("name") and _is_real_course_name(info["name"]):
+                    subject.name = info["name"]
+                if info.get("description"):
+                    registry.update_requirements(
+                        subject.subject_id,
+                        info["description"],
+                        info.get("teacher_name", ""),
+                        info.get("teacher_email", "")
+                    )
+                    if info.get("teacher_name"):
+                        teachers.add_or_update(
+                            info["teacher_name"],
+                            info.get("teacher_email", ""),
+                            info["description"],
+                            [subject.name]
+                        )
+
+                # Собираем активности
+                activities = bot.get_course_activities()
+                new_q, new_a = 0, 0
+                for a in activities:
+                    if a["type"] == "quiz" and a["url"] not in subject.quiz_urls:
+                        subject.quiz_urls.append(a["url"])
+                        stats["quizzes"] += 1
+                        new_q += 1
+                    elif a["type"] == "assignment" and a["url"] not in subject.assignment_urls:
+                        subject.assignment_urls.append(a["url"])
+                        stats["assignments"] += 1
+                        new_a += 1
+
+                registry._save()
+                print(f"  [{subject.name[:40]}] тестов: +{new_q}, заданий: +{new_a}")
+
+            except Exception as e:
+                stats["errors"] += 1
+                print(f"  ⚠️ [{subject.name}]: {e}")
+
+        tg.notify(
+            f"✅ <b>Сканирование online.fa.ru завершено</b>\n\n"
+            f"Предметов: <b>{len(online_subjects)}</b>\n"
+            f"Тестов найдено: <b>{stats['quizzes']}</b>\n"
+            f"Заданий найдено: <b>{stats['assignments']}</b>\n"
+            f"Ошибок: <b>{stats['errors']}</b>"
+        )
+
+    except Exception as e:
+        tg.notify_error("Сканирование online.fa.ru", str(e))
+    finally:
+        bot.close()
+
+
 def get_upcoming_deadlines() -> list:
-    """Читает календарь, возвращает предстоящие события."""
+    """Читает календарь campus.fa.ru, возвращает предстоящие события."""
     bot = UniBrowser(headless=True)
     try:
         bot.login()
