@@ -29,11 +29,12 @@ class Subject:
     teacher_email: str = ""
 
     # Новые флаги
-    external_platform: bool = False      # Курс на другой платформе (online.fa.ru и т.п.)
+    external_platform: bool = False      # Курс на неподдерживаемой платформе (Stepik и т.п.)
     external_url: str = ""               # Куда ведёт (если external)
     needs_enrollment: bool = False       # Нужна запись на курс
     completed: bool = False              # Предмет полностью сдан (пропускаем)
     semester: str = ""                   # "1" или "2" — для фильтра по семестру
+    source_platform: str = ""            # Базовый URL платформы (пусто = campus.fa.ru, иначе напр. https://online.fa.ru)
 
     # Информация по тестам/заданиям (словари: url -> статус)
     quiz_status: dict = field(default_factory=dict)          # {url: "new"|"in_progress"|"done"}
@@ -65,6 +66,11 @@ class Subject:
     def add_notes_file(self, filepath: str):
         if filepath not in self.notes_files:
             self.notes_files.append(filepath)
+
+    def get_context_for_topic(self, topic: str = "") -> str:
+        """Возвращает конспект предмета, обрезанный до 3000 символов.
+        Фильтрация по теме — в будущем; сейчас отдаём полный конспект."""
+        return self.get_full_knowledge()[:3000]
 
 
 class SubjectRegistry:
@@ -164,6 +170,7 @@ class SubjectRegistry:
                     "teacher_requirements": "", "teacher_name": "", "teacher_email": "",
                     "external_platform": False, "external_url": "",
                     "needs_enrollment": False, "completed": False, "semester": "",
+                    "source_platform": "",
                     "quiz_status": {}, "quiz_attempts": {},
                     "assignment_status": {}, "assignment_deadlines": {},
                 }
