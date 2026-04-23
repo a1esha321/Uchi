@@ -307,9 +307,13 @@ def handle_message(message: dict):
 
     # ── Ответ на микро-квиз (/learn) ──
     if chat_id in quiz_states and not text.startswith("/"):
-        if km:
-            state = quiz_states.pop(chat_id)
-            def _eval():
+        state = quiz_states.pop(chat_id)
+        if not km:
+            send("⚠️ KnowledgeMirror недоступен — проверь GROQ_API_KEY")
+            return
+
+        def _eval():
+            try:
                 is_correct = km.evaluate_user_answer(text, state["correct_answer"])
                 km.update_confidence(state["subject_id"], state["topic"], is_correct)
                 km.log_session(
@@ -323,7 +327,10 @@ def handle_message(message: dict):
                         f"❌ Не совсем.\n\n"
                         f"<b>Эталон:</b> <i>{state['correct_answer'][:400]}</i>"
                     )
-            threading.Thread(target=_eval, daemon=True).start()
+            except Exception as e:
+                send(f"⚠️ Ошибка при проверке ответа: {e}")
+
+        threading.Thread(target=_eval, daemon=True).start()
         return
 
     # ── Debug ──
@@ -476,12 +483,8 @@ def handle_message(message: dict):
         return
 
     if text == "/scan_online":
-        current_semester = os.getenv("SEMESTER", "2")
         send("🌐 Сканирую online.fa.ru...")
-        threading.Thread(
-            target=lambda: scan_online_fa_courses(current_semester=current_semester),
-            daemon=True
-        ).start()
+        threading.Thread(target=scan_online_fa_courses, daemon=True).start()
         return
 
     if text == "/upcoming":

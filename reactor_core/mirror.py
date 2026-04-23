@@ -1,6 +1,7 @@
 import os
 import sqlite3
 import logging
+import threading
 from datetime import datetime
 from typing import Optional, List, Tuple
 
@@ -19,6 +20,7 @@ class KnowledgeMirror:
             raise RuntimeError("GROQ_API_KEY не задан в .env")
 
         self.db_path = db_path
+        self._lock = threading.Lock()
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.cursor = self.conn.cursor()
         self.groq = Groq()
@@ -26,61 +28,62 @@ class KnowledgeMirror:
         logger.info("KnowledgeMirror инициализирован")
 
     def _init_db(self):
-        self.cursor.executescript("""
-            CREATE TABLE IF NOT EXISTS user_knowledge (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                subject_id TEXT,
-                topic TEXT,
-                confidence REAL DEFAULT 0.5,
-                last_quizzed TIMESTAMP,
-                times_correct INTEGER DEFAULT 0,
-                times_incorrect INTEGER DEFAULT 0,
-                UNIQUE(subject_id, topic)
-            );
-            CREATE TABLE IF NOT EXISTS learning_sessions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                subject_id TEXT,
-                topic TEXT,
-                start_time TIMESTAMP,
-                end_time TIMESTAMP,
-                was_correct INTEGER,
-                notes TEXT
-            );
-        """)
-        self.conn.commit()
+        with self._lock:
+            self.cursor.executescript("""
+                CREATE TABLE IF NOT EXISTS user_knowledge (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    subject_id TEXT,
+                    topic TEXT,
+                    confidence REAL DEFAULT 0.5,
+                    last_quizzed TIMESTAMP,
+                    times_correct INTEGER DEFAULT 0,
+                    times_incorrect INTEGER DEFAULT 0,
+                    UNIQUE(subject_id, topic)
+                );
+                CREATE TABLE IF NOT EXISTS learning_sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    subject_id TEXT,
+                    topic TEXT,
+                    start_time TIMESTAMP,
+                    end_time TIMESTAMP,
+                    was_correct INTEGER,
+                    notes TEXT
+                );
+            """)
+            self.conn.commit()
 
     def update_confidence(self, subject_id: str, topic: str, is_correct: bool):
         """
         Обновляем счётчики и пересчитываем confidence двумя запросами,
-        чтобы не было гонки в SQL-выражении.
+        чтобы не было гонки в SQL-выражении. Lock гарантирует безопасность из потоков.
         """
         now = datetime.now().isoformat()
+        with self._lock:
+            # 1. UPSERT счётчиков
+            self.cursor.execute("""
+                INSERT INTO user_knowledge
+                    (subject_id, topic, last_quizzed, times_correct, times_incorrect)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(subject_id, topic) DO UPDATE SET
+                    last_quizzed = excluded.last_quizzed,
+                    times_correct = times_correct + ?,
+                    times_incorrect = times_incorrect + ?
+            """, (
+                subject_id, topic, now,
+                1 if is_correct else 0,
+                0 if is_correct else 1,
+                1 if is_correct else 0,
+                0 if is_correct else 1,
+            ))
 
-        # 1. UPSERT счётчиков
-        self.cursor.execute("""
-            INSERT INTO user_knowledge
-                (subject_id, topic, last_quizzed, times_correct, times_incorrect)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(subject_id, topic) DO UPDATE SET
-                last_quizzed = excluded.last_quizzed,
-                times_correct = times_correct + ?,
-                times_incorrect = times_incorrect + ?
-        """, (
-            subject_id, topic, now,
-            1 if is_correct else 0,
-            0 if is_correct else 1,
-            1 if is_correct else 0,
-            0 if is_correct else 1,
-        ))
+            # 2. Пересчёт confidence по формуле Лапласа: (correct + 1) / (total + 2)
+            self.cursor.execute("""
+                UPDATE user_knowledge
+                SET confidence = (times_correct + 1.0) / (times_correct + times_incorrect + 2.0)
+                WHERE subject_id = ? AND topic = ?
+            """, (subject_id, topic))
 
-        # 2. Пересчёт confidence по формуле Лапласа: (correct + 1) / (total + 2)
-        self.cursor.execute("""
-            UPDATE user_knowledge
-            SET confidence = (times_correct + 1.0) / (times_correct + times_incorrect + 2.0)
-            WHERE subject_id = ? AND topic = ?
-        """, (subject_id, topic))
-
-        self.conn.commit()
+            self.conn.commit()
         logger.info(f"Уверенность '{topic}' обновлена: {'+' if is_correct else '-'}")
 
     def get_weak_topics(self, subject_id: Optional[str] = None,
@@ -91,8 +94,9 @@ class KnowledgeMirror:
             query += " AND subject_id = ?"
             params.append(subject_id)
         query += " ORDER BY confidence ASC"
-        self.cursor.execute(query, params)
-        return self.cursor.fetchall()
+        with self._lock:
+            self.cursor.execute(query, params)
+            return self.cursor.fetchall()
 
     def get_strong_topics(self, subject_id: Optional[str] = None,
                           threshold: float = 0.8) -> List[Tuple]:
@@ -102,8 +106,9 @@ class KnowledgeMirror:
             query += " AND subject_id = ?"
             params.append(subject_id)
         query += " ORDER BY confidence DESC"
-        self.cursor.execute(query, params)
-        return self.cursor.fetchall()
+        with self._lock:
+            self.cursor.execute(query, params)
+            return self.cursor.fetchall()
 
     def generate_micro_quiz(self, subject_name: str, topic: str,
                             context_text: str) -> Tuple[str, str]:
@@ -160,8 +165,9 @@ class KnowledgeMirror:
             return False
 
     def should_remind(self, days_since_last_quiz: int = 3) -> bool:
-        self.cursor.execute("SELECT MAX(last_quizzed) FROM user_knowledge")
-        last = self.cursor.fetchone()[0]
+        with self._lock:
+            self.cursor.execute("SELECT MAX(last_quizzed) FROM user_knowledge")
+            last = self.cursor.fetchone()[0]
         if last is None:
             return True
         last_date = datetime.fromisoformat(last)
@@ -187,10 +193,11 @@ class KnowledgeMirror:
     def log_session(self, subject_id: str, topic: str,
                     start: datetime, end: datetime,
                     was_correct: bool, notes: str = ""):
-        self.cursor.execute("""
-            INSERT INTO learning_sessions
-                (subject_id, topic, start_time, end_time, was_correct, notes)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (subject_id, topic, start.isoformat(), end.isoformat(),
-              1 if was_correct else 0, notes))
-        self.conn.commit()
+        with self._lock:
+            self.cursor.execute("""
+                INSERT INTO learning_sessions
+                    (subject_id, topic, start_time, end_time, was_correct, notes)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (subject_id, topic, start.isoformat(), end.isoformat(),
+                  1 if was_correct else 0, notes))
+            self.conn.commit()

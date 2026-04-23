@@ -462,7 +462,7 @@ def run_all_quizzes(dry_run: bool = False):
             SubjectAgent(subject).run_quizzes(dry_run=dry_run)
 
 
-def scan_online_fa_courses(current_semester: str = "2"):
+def scan_online_fa_courses():
     """
     Сканирует курсы на online.fa.ru для предметов, у которых source_platform = ONLINE_FA_URL.
     Находит тесты и задания, сохраняет в реестр.
