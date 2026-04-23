@@ -35,6 +35,7 @@ class Subject:
     completed: bool = False              # Предмет полностью сдан (пропускаем)
     semester: str = ""                   # "1" или "2" — для фильтра по семестру
     source_platform: str = ""            # Базовый URL платформы (пусто = campus.fa.ru, иначе напр. https://online.fa.ru)
+    course_url: str = ""                 # Прямая ссылка на страницу курса в Moodle
 
     # Информация по тестам/заданиям (словари: url -> статус)
     quiz_status: dict = field(default_factory=dict)          # {url: "new"|"in_progress"|"done"}
@@ -171,6 +172,7 @@ class SubjectRegistry:
                     "external_platform": False, "external_url": "",
                     "needs_enrollment": False, "completed": False, "semester": "",
                     "source_platform": "",
+                    "course_url": "",
                     "quiz_status": {}, "quiz_attempts": {},
                     "assignment_status": {}, "assignment_deadlines": {},
                 }

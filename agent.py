@@ -334,6 +334,8 @@ def scan_all_courses(current_semester: str = "2"):
                 subject = Subject(name=name, subject_id=subject_id)
                 registry.add(subject)
 
+            subject.course_url = url  # сохраняем для /tasks
+
             # Определяем семестр
             semester = _detect_semester(name)
             subject.semester = semester
@@ -497,6 +499,7 @@ def scan_online_fa_courses():
                     continue
 
                 bot.goto(course_url)
+                subject.course_url = course_url  # сохраняем для /tasks
 
                 # Обновляем название и требования
                 info = bot.get_course_info()
@@ -557,5 +560,53 @@ def get_upcoming_deadlines() -> list:
     try:
         bot.login()
         return bot.get_upcoming_deadlines()
+    finally:
+        bot.close()
+
+
+def build_task_list(subject_id: str) -> str:
+    """
+    Парсит полную структуру курса и возвращает Telegram HTML
+    со списком задач, сгенерированным AI.
+    """
+    from course_requirements import RequirementsParser
+
+    registry = SubjectRegistry()
+    subject = registry.get(subject_id)
+    if not subject:
+        return "⚠️ Предмет не найден"
+    if not subject.course_url:
+        return (
+            "⚠️ URL курса ещё не сохранён.\n"
+            "Выполни <code>/scan</code> (или <code>/scan_online</code>), "
+            "затем повтори <code>/tasks</code>."
+        )
+
+    base_url = subject.source_platform or None
+    bot = UniBrowser(headless=True, base_url=base_url)
+    tg = TelegramNotifier()
+    try:
+        bot.login()
+        parser = RequirementsParser()
+        result = parser.parse(bot, subject.course_url)
+        html = parser.format_html(result)
+
+        # Сохраняем структуру как конспект, чтобы AI знал о курсе
+        sections_text = parser.format_sections_html(result["sections"])
+        notes_dir = "notes"
+        os.makedirs(notes_dir, exist_ok=True)
+        path = f"{notes_dir}/{subject_id}_structure.txt"
+        import re as _re
+        plain = _re.sub(r"<[^>]+>", "", sections_text)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(f"Структура курса: {result['course_name']}\n")
+            f.write("=" * 50 + "\n\n")
+            f.write(plain)
+        registry.add_notes(subject_id, path)
+
+        return html
+    except Exception as e:
+        tg.notify_error("build_task_list", str(e))
+        return f"⚠️ Ошибка парсинга: {e}"
     finally:
         bot.close()

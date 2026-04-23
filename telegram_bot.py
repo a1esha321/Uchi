@@ -12,6 +12,7 @@ telegram_bot.py — главная точка входа.
   /quizzes        — пройти все тесты (с подтверждением)
   /assignments    — выполнить все задания (с подтверждением)
   /preview <url>  — dry-run теста/задания (решить но не отправлять)
+  /tasks          — полный список задач по предмету (AI-парсинг курса)
   /learn          — микро-квиз по теме с низкой уверенностью
   /map            — карта знаний: слабые и сильные темы
   /stats          — статистика работы бота
@@ -39,7 +40,7 @@ from subjects import SubjectRegistry, Subject, TeacherRegistry, Stats
 from agent import (
     SubjectAgent, scan_all_courses, scan_online_fa_courses,
     run_all_assignments, run_all_quizzes,
-    get_upcoming_deadlines, ONLINE_FA_URL,
+    get_upcoming_deadlines, build_task_list, ONLINE_FA_URL,
 )
 from debug_tool import debug_page, debug_test_page
 from qa_cache import QACache
@@ -431,6 +432,7 @@ def handle_message(message: dict):
             "/quizzes — пройти все тесты\n"
             "/assignments — все задания\n\n"
             "<b>Знания:</b>\n"
+            "/tasks — список задач по предмету (AI)\n"
             "/learn — микро-квиз по слабой теме\n"
             "/map — карта знаний (сильные/слабые темы)\n\n"
             "<b>Дополнительно:</b>\n"
@@ -728,6 +730,19 @@ def handle_message(message: dict):
         send(km.get_knowledge_summary())
         return
 
+    if text == "/tasks":
+        refresh_registry()
+        subjects = [s for s in registry.all(active_only=True) if s.course_url]
+        if not subjects:
+            send(
+                "⚠️ Нет предметов с сохранённым URL курса.\n"
+                "Выполни <code>/scan</code> сначала."
+            )
+            return
+        send("📋 Для какого предмета составить список задач?",
+             keyboard=subject_keyboard("tasks", active_only=True))
+        return
+
     if text == "/reminders":
         refresh_registry()
         now = datetime.now()
@@ -793,6 +808,24 @@ def handle_callback(data: str, cb_id: str, chat_id: str):
 
     if data == "sched_skip" and p and p["type"] == "schedule":
         _next_slot(p, chat_id)
+        return
+
+    if data.startswith("tasks:"):
+        subject = registry.get(data.split(":", 1)[1])
+        if not subject:
+            return
+        send(f"⏳ Парсю курс <b>{subject.name}</b>, это займёт ~30 сек...")
+
+        def _build(sid=subject.subject_id):
+            html = build_task_list(sid)
+            # Telegram limit 4096 — шлём частями
+            for i in range(0, len(html), 4000):
+                send(html[i:i + 4000])
+
+        threading.Thread(
+            target=lambda: _run_with_error_notify(_build),
+            daemon=True,
+        ).start()
         return
 
     if data.startswith("quiz:") and p and p["type"] == "quiz":

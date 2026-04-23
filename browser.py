@@ -244,6 +244,114 @@ class UniBrowser:
 
         return activities
 
+    def get_course_structure(self) -> list:
+        """
+        Возвращает структуру курса по секциям.
+        Каждая секция: {title, activities: [{type, name, url, completed, deadline, description}]}
+        Совместим с Moodle 3.x и 4.x (campus.fa.ru и online.fa.ru).
+        """
+        time.sleep(1)
+        try:
+            for c in self.page.query_selector_all('[aria-expanded="false"]')[:20]:
+                try:
+                    c.click()
+                    time.sleep(0.1)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        return self.page.evaluate("""() => {
+            const TYPE_MAP = {
+                quiz: 'quiz', assign: 'assignment', resource: 'resource',
+                folder: 'folder', lesson: 'lesson', forum: 'forum',
+                page: 'page', url: 'url', label: 'label',
+                scorm: 'scorm', wiki: 'wiki', choice: 'choice',
+                feedback: 'feedback', survey: 'survey',
+            };
+
+            function getType(cls) {
+                for (const [k, v] of Object.entries(TYPE_MAP)) {
+                    if (cls.includes(k)) return v;
+                }
+                if (cls.includes('mts-link') || cls.includes('webinar')) return 'video';
+                return 'other';
+            }
+
+            function isCompleted(el) {
+                if (el.querySelector('[aria-label*="завершено"], [aria-label*="Выполнено"], [title*="завершено"]')) return true;
+                if (el.querySelector('img[src*="completion-auto-y"], img[src*="completion-manual-y"]')) return true;
+                if (el.querySelector('.autocompletion .fa-check, .completion-icon .fa-check')) return true;
+                return false;
+            }
+
+            function extractDeadline(el) {
+                const text = (el.innerText || '');
+                const m = text.match(/(?:до|срок[^:]*:|due[^:]*:)\\s*([\\d]+\\s+\\w+\\s+\\d{4}[^\\n,]*)/i);
+                return m ? m[1].trim() : '';
+            }
+
+            const result = [];
+
+            // Пробуем несколько вариантов Moodle
+            const sectionSelectors = [
+                'li.section.main', 'li.section',
+                '.course-section', '[data-for="section"]',
+            ];
+
+            let sections = [];
+            for (const sel of sectionSelectors) {
+                sections = [...document.querySelectorAll(sel)];
+                if (sections.length > 0) break;
+            }
+
+            // Fallback: плоский список активностей
+            if (sections.length === 0) {
+                const acts = [];
+                for (const el of document.querySelectorAll('li.activity, .activity')) {
+                    const a = el.querySelector('a[href*="/mod/"]');
+                    if (!a || !a.href) continue;
+                    acts.push({
+                        type: getType(el.className),
+                        name: (a.innerText || '').trim().replace(/\\s+/g, ' ') || 'Без названия',
+                        url: a.href,
+                        completed: isCompleted(el),
+                        deadline: extractDeadline(el),
+                        description: ((el.querySelector('.description, .contentafterlink') || {}).innerText || '').trim().slice(0, 200),
+                    });
+                }
+                if (acts.length > 0) result.push({ title: '', activities: acts });
+                return result;
+            }
+
+            for (const sec of sections) {
+                const titleEl = sec.querySelector(
+                    '.sectionname, h3.sectionname, .section_title, ' +
+                    '.course-section-header h3, [data-region="section-header"] h3'
+                );
+                const title = titleEl ? titleEl.innerText.trim() : '';
+
+                const activities = [];
+                for (const el of sec.querySelectorAll('li.activity, .activity:not(.section)')) {
+                    const a = el.querySelector('a[href*="/mod/"]');
+                    if (!a || !a.href) continue;
+                    activities.push({
+                        type: getType(el.className),
+                        name: (a.innerText || '').trim().replace(/\\s+/g, ' ') || 'Без названия',
+                        url: a.href,
+                        completed: isCompleted(el),
+                        deadline: extractDeadline(el),
+                        description: ((el.querySelector('.description, .contentafterlink') || {}).innerText || '').trim().slice(0, 200),
+                    });
+                }
+
+                if (activities.length > 0 || title) {
+                    result.push({ title, activities });
+                }
+            }
+            return result;
+        }""") or []
+
     # ─── Состояние теста ──────────────────────────────────────
 
     def get_quiz_state(self) -> dict:
