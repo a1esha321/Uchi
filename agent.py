@@ -15,6 +15,7 @@ from smart_solver import SmartSolver
 from essay_solver import EssaySolver
 from browser import UniBrowser, EXTERNAL_DOMAINS
 from telegram_notifier import TelegramNotifier
+from quiz_digest import QuizDigest
 
 NOTES_DIR = "notes"
 
@@ -146,6 +147,17 @@ class SubjectAgent:
                 self.stats.record_quiz(s.subject_id, "passed")
                 grade_str = f"\nОценка: <b>{grade}</b>" if grade else ""
                 self.tg.notify(f"✅ Тест сдан: <b>{s.name}</b>{grade_str}")
+
+                # Генерируем дайджест и сохраняем как конспект
+                try:
+                    digest = QuizDigest(s.name)
+                    digest_html = digest.generate(questions, answers, confidences, grade)
+                    if digest_html:
+                        self.tg.notify(digest_html)
+                        digest_path = digest.save(s.subject_id, digest_html)
+                        self.registry.add_notes(s.subject_id, digest_path)
+                except Exception as digest_err:
+                    print(f"  ⚠️ Дайджест не сгенерирован: {digest_err}")
             else:
                 self.stats.record_quiz(s.subject_id, "skipped")
                 self.tg.notify(f"⏭ Тест пропущен: <b>{s.name}</b>")
