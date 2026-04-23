@@ -272,9 +272,21 @@ def _is_real_course_name(name: str) -> bool:
 
 
 def _detect_semester(course_name: str) -> str:
-    """Парсит '_1_сем' или '_2_сем' из названия курса."""
-    m = re.search(r'_(\d)_сем', course_name)
-    return m.group(1) if m else ""
+    """
+    Парсит номер семестра из названия курса.
+    Поддерживает форматы: _2_сем, _сем2, _1_semester, сем.1, семестр_2 и т.д.
+    """
+    patterns = [
+        r'_(\d)_сем',              # _2_сем  (стандарт ФА)
+        r'_сем[а-я]*[-_. ]*(\d)',  # _сем2, _семестр_2
+        r'сем[а-я]*[-_. ]*(\d)',   # сем2, семестр 2
+        r'_(\d)[-_. ]*sem',        # _2_sem (латиница)
+    ]
+    for p in patterns:
+        m = re.search(p, course_name, re.IGNORECASE)
+        if m:
+            return m.group(1)
+    return ""
 
 
 def _detect_group_year(course_name: str) -> str:
@@ -348,7 +360,10 @@ def scan_all_courses(current_semester: str = "2"):
                 subject = Subject(name=name, subject_id=subject_id)
                 registry.add(subject)
 
-            subject.course_url = url  # сохраняем для /tasks
+            # Сбрасываем completed — каждый /scan пересчитывает заново
+            subject.completed = False
+            subject.external_platform = False
+            subject.course_url = url
 
             # Определяем семестр и год набора группы
             semester = _detect_semester(name)
