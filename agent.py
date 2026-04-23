@@ -585,6 +585,18 @@ def build_task_list(subject_id: str) -> str:
     base_url = subject.source_platform or None
     platform_root = (subject.source_platform or "https://campus.fa.ru").rstrip("/")
 
+    if subject.source_platform == ONLINE_FA_URL:
+        return (
+            f"⚠️ <b>{subject.name}</b>\n\n"
+            f"Курс на online.fa.ru использует SSO-авторизацию без локальной формы логина. "
+            f"Автоматический парсинг недоступен.\n\n"
+            f"Что можно сделать:\n"
+            f"• Открой курс вручную на online.fa.ru\n"
+            f"• Скопируй ссылку на страницу курса\n"
+            f"• Отправь <code>/debug_course &lt;ссылка&gt;</code> — "
+            f"бот получит дамп страницы пока ты залогинен через токен"
+        )
+
     # Гарантируем абсолютный URL (старые записи могут хранить относительный путь)
     course_url = subject.course_url
     if course_url.startswith("/"):
