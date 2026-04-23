@@ -488,7 +488,7 @@ def scan_online_fa_courses():
     stats = {"quizzes": 0, "assignments": 0, "errors": 0}
 
     try:
-        bot.login()
+        bot.login_any()
 
         for subject in online_subjects:
             try:
@@ -593,7 +593,7 @@ def build_task_list(subject_id: str) -> str:
     bot = UniBrowser(headless=True, base_url=base_url)
     tg = TelegramNotifier()
     try:
-        bot.login()
+        bot.login_any()
         parser = RequirementsParser()
         result = parser.parse(bot, course_url)
         html = parser.format_html(result)

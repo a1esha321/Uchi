@@ -50,15 +50,29 @@ class UniBrowser:
 
         self._do_login(f"{self.base_url}/login/index.php")
 
+    def login_any(self):
+        """
+        Логин с автоопределением метода.
+        Сначала пробует локальную форму (campus.fa.ru),
+        при SSO-only платформе — логинится через campus и передаёт сессию.
+        """
+        try:
+            self.login()
+        except RuntimeError as e:
+            if "поля логина" in str(e):
+                print(f"  ℹ️ Локальный логин недоступен, пробую SSO через campus.fa.ru...")
+                self._login_via_campus_sso()
+            else:
+                raise
+
     def _do_login(self, login_url: str):
-        """Внутренний метод: открывает страницу логина и вводит credentials."""
+        """Открывает страницу логина и заполняет форму username/password."""
         login_val = os.getenv("UNI_LOGIN")
         password_val = os.getenv("UNI_PASSWORD")
 
         self.page.goto(login_url, timeout=60000)
         self.page.wait_for_load_state("networkidle")
 
-        # Ждём появления поля логина (форма может рендериться JS)
         try:
             self.page.wait_for_selector(
                 'input[name="username"], input[id="username"], '
@@ -76,9 +90,8 @@ class UniBrowser:
             self.page.query_selector('input[name="j_username"]')
         )
 
-        # Moodle с SSO: форма видна только по ?loginpage=1
+        # Moodle SSO: форма не отображается → пробуем ?loginpage=1
         if not username_field and "loginpage=1" not in login_url:
-            print("  ℹ️ Форма логина не найдена, пробую ?loginpage=1 ...")
             self._do_login(login_url.split("?")[0] + "?loginpage=1")
             return
 
@@ -124,6 +137,98 @@ class UniBrowser:
 
         print("✅ Авторизация успешна")
 
+    def _login_via_campus_sso(self):
+        """
+        Для SSO-only платформ (online.fa.ru):
+        1. Логинимся на campus.fa.ru (форма там есть).
+        2. Переходим на текущую платформу и жмём кнопку SSO.
+           Браузер передаёт сессию через единый SSO-сервер ФА.
+        """
+        login_val = os.getenv("UNI_LOGIN")
+        password_val = os.getenv("UNI_PASSWORD")
+        campus_root = os.getenv("UNI_URL", "https://campus.fa.ru").split("/login")[0].rstrip("/")
+
+        # Шаг 1: логин на campus.fa.ru
+        self.page.goto(f"{campus_root}/login/index.php", timeout=60000)
+        self.page.wait_for_load_state("networkidle")
+        try:
+            self.page.wait_for_selector('input[name="username"], input[id="username"]', timeout=10000)
+        except Exception:
+            pass
+
+        u = (self.page.query_selector('input[name="username"]') or
+             self.page.query_selector('input[id="username"]'))
+        p = (self.page.query_selector('input[name="password"]') or
+             self.page.query_selector('input[id="password"]') or
+             self.page.query_selector('input[type="password"]'))
+
+        if not u or not p:
+            raise RuntimeError("Не нашёл форму логина на campus.fa.ru — SSO невозможен")
+
+        u.fill(login_val)
+        p.fill(password_val)
+
+        submit = (self.page.query_selector('#loginbtn') or
+                  self.page.query_selector('button[type="submit"]') or
+                  self.page.query_selector('input[type="submit"]'))
+        if submit:
+            submit.click()
+
+        self.page.wait_for_load_state("networkidle", timeout=30000)
+        time.sleep(2)
+
+        if "login" in self.page.url.lower():
+            raise RuntimeError("Логин campus.fa.ru не прошёл — проверь UNI_LOGIN/UNI_PASSWORD")
+
+        print(f"✅ campus.fa.ru вошли, передаю сессию на {self.base_url}...")
+
+        # Шаг 2: открываем логин-страницу текущей платформы
+        self.page.goto(f"{self.base_url}/login/index.php", timeout=60000)
+        self.page.wait_for_load_state("networkidle")
+        time.sleep(2)
+
+        if "login" not in self.page.url.lower():
+            print("✅ SSO авторизация прошла автоматически")
+            return
+
+        # Шаг 3: ищем и жмём SSO/OAuth кнопку
+        sso_selectors = [
+            '.potentialidplist a', '.login-identityproviders a',
+            'a[href*="/auth/oauth2"]', 'a[href*="/auth/oidc"]',
+            'a[href*="/auth/cas"]',  'a[href*="/auth/saml2"]',
+            'a[href*="oauth"]',      'a[href*="sso"]',
+            'a.btn:not([href*="signup"]):not([href*="forgot"])',
+        ]
+        clicked = False
+        for sel in sso_selectors:
+            btn = self.page.query_selector(sel)
+            if btn:
+                href = btn.evaluate("el => el.href") or ""
+                print(f"  Нажимаю SSO: {href[:100]}")
+                btn.click()
+                self.page.wait_for_load_state("networkidle", timeout=30000)
+                time.sleep(4)
+                clicked = True
+                break
+
+        if not clicked:
+            links = self.page.evaluate("""() =>
+                [...document.querySelectorAll('a[href]')].map(a =>
+                    a.href + ' :: ' + (a.innerText || '').trim().slice(0, 50)
+                ).join('\\n')
+            """) or "нет ссылок"
+            raise RuntimeError(
+                f"Не нашёл SSO кнопку на {self.base_url}/login.\n"
+                f"Ссылки на странице:\n{links[:600]}"
+            )
+
+        if "login" in self.page.url.lower():
+            raise RuntimeError(
+                f"SSO логин не прошёл. Финальный URL: {self.page.url[:120]}"
+            )
+
+        print(f"✅ SSO авторизация на {self.base_url} успешна")
+
     def goto(self, url: str):
         self.page.goto(url, timeout=60000)
         self.page.wait_for_load_state("networkidle")
@@ -131,7 +236,7 @@ class UniBrowser:
         # Если Moodle перекинул на логин — пробуем залогиниться ещё раз
         if "login" in self.page.url.lower():
             print(f"  ⚠️ Редирект на логин при переходе на {url[:80]}, повторный логин...")
-            self.login()
+            self.login_any()
             self.page.goto(url, timeout=60000)
             self.page.wait_for_load_state("networkidle")
             time.sleep(2)
