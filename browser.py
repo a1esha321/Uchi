@@ -78,12 +78,17 @@ class UniBrowser:
         if not username_field or not password_field:
             current_url = self.page.url
             page_title = self.page.title()
+            inputs_info = self.page.evaluate("""() =>
+                [...document.querySelectorAll('input')].map(i =>
+                    'type=' + i.type + ' name=' + i.name + ' id=' + i.id +
+                    ' placeholder=' + i.placeholder
+                ).join('\\n')
+            """) or "нет полей"
             raise RuntimeError(
                 f"Не нашёл поля логина.\n"
-                f"URL страницы: {current_url[:120]}\n"
+                f"URL: {current_url[:120]}\n"
                 f"Заголовок: {page_title[:80]}\n"
-                f"Возможно, campus.fa.ru использует SSO на другом домене. "
-                f"Проверь UNI_URL в Railway."
+                f"Поля на странице:\n{inputs_info[:600]}"
             )
 
         username_field.fill(login_val)
