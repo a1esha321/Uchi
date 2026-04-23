@@ -51,24 +51,48 @@ class UniBrowser:
         self.page.goto(f"{self.base_url}/login/index.php", timeout=60000)
         self.page.wait_for_load_state("networkidle")
 
+        # Ждём появления поля логина — форма может рендериться JS
+        try:
+            self.page.wait_for_selector(
+                'input[name="username"], input[id="username"], '
+                'input[type="email"], input[name="login"], input[name="j_username"]',
+                timeout=10000,
+            )
+        except Exception:
+            pass
+
         username_field = (
             self.page.query_selector('input[name="username"]') or
-            self.page.query_selector('input[id="username"]')
+            self.page.query_selector('input[id="username"]') or
+            self.page.query_selector('input[type="email"]') or
+            self.page.query_selector('input[name="login"]') or
+            self.page.query_selector('input[name="j_username"]')
         )
         password_field = (
             self.page.query_selector('input[name="password"]') or
-            self.page.query_selector('input[id="password"]')
+            self.page.query_selector('input[id="password"]') or
+            self.page.query_selector('input[type="password"]') or
+            self.page.query_selector('input[name="j_password"]')
         )
 
         if not username_field or not password_field:
-            raise RuntimeError("Не нашёл поля логина")
+            current_url = self.page.url
+            page_title = self.page.title()
+            raise RuntimeError(
+                f"Не нашёл поля логина.\n"
+                f"URL страницы: {current_url[:120]}\n"
+                f"Заголовок: {page_title[:80]}\n"
+                f"Возможно, campus.fa.ru использует SSO на другом домене. "
+                f"Проверь UNI_URL в Railway."
+            )
 
         username_field.fill(login_val)
         password_field.fill(password_val)
 
         submit = (
             self.page.query_selector('#loginbtn') or
-            self.page.query_selector('button[type="submit"]')
+            self.page.query_selector('button[type="submit"]') or
+            self.page.query_selector('input[type="submit"]')
         )
         if submit:
             submit.click()
