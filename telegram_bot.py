@@ -419,31 +419,25 @@ def handle_message(message: dict):
         return
 
     # ── Команды ──
-    if text == "/start":
+    if text in ("/start", "/menu"):
+        kb = [
+            [{"text": "🔍 Сканировать курсы",    "callback_data": "menu:scan"},
+             {"text": "📚 Предметы",              "callback_data": "menu:subjects"}],
+            [{"text": "📋 Задачи всех курсов",    "callback_data": "menu:tasks_all"}],
+            [{"text": "📋 Задачи предмета",        "callback_data": "menu:tasks"},
+             {"text": "⏰ Дедлайны",              "callback_data": "menu:reminders"}],
+            [{"text": "🧪 Пройти тесты",           "callback_data": "menu:quizzes"},
+             {"text": "✍️ Выполнить задания",      "callback_data": "menu:assignments"}],
+            [{"text": "🧠 Квиз по теме",           "callback_data": "menu:learn"},
+             {"text": "🗺 Карта знаний",           "callback_data": "menu:map"}],
+            [{"text": "📊 Статистика",             "callback_data": "menu:stats"},
+             {"text": "❓ Помощь",                 "callback_data": "menu:help"}],
+        ]
         send(
-            "👋 <b>Агент для заочного обучения</b>\n\n"
-            "<b>Основные:</b>\n"
-            "/scan — просканировать campus.fa.ru\n"
-            "/scan_online — просканировать online.fa.ru\n"
-            "/subjects — список предметов\n"
-            "/course <i>id</i> — карточка курса\n"
-            "/upcoming — дедлайны из календаря\n"
-            "/reminders — мои дедлайны (с таймером)\n"
-            "/quizzes — пройти все тесты\n"
-            "/assignments — все задания\n\n"
-            "<b>Знания:</b>\n"
-            "/tasks — список задач по предмету (AI)\n"
-            "/learn — микро-квиз по слабой теме\n"
-            "/map — карта знаний (сильные/слабые темы)\n\n"
-            "<b>Дополнительно:</b>\n"
-            "/preview <i>url</i> — dry-run\n"
-            "/stats — статистика\n"
-            "/cache — статистика кэша Q&A\n"
-            "/export <i>id</i> — конспекты\n"
-            "/teachers — преподаватели\n"
-            "/debug <i>url</i> — отладка страницы\n"
-            "/debug_course <i>url</i> — дамп курса (JSON)\n"
-            "/help — подробнее"
+            "📱 <b>Главное меню</b>\n\n"
+            "Выбери действие или введи команду вручную.\n"
+            "Все команды: /help",
+            keyboard=kb,
         )
         return
 
@@ -743,6 +737,28 @@ def handle_message(message: dict):
              keyboard=subject_keyboard("tasks", active_only=True))
         return
 
+    if text == "/tasks_all":
+        refresh_registry()
+        subjects = [s for s in registry.all(active_only=True) if s.course_url]
+        if not subjects:
+            send("⚠️ Нет предметов с сохранённым URL курса. Выполни /scan сначала.")
+            return
+        send(f"📋 Парсю задачи для <b>{len(subjects)}</b> предметов. Это займёт несколько минут...")
+
+        def _all_tasks():
+            for s in subjects:
+                send(f"⏳ <b>{s.name}</b>...")
+                html = build_task_list(s.subject_id)
+                for i in range(0, len(html), 4000):
+                    send(html[i:i + 4000])
+            send("✅ <b>Готово — все предметы разобраны.</b>")
+
+        threading.Thread(
+            target=lambda: _run_with_error_notify(_all_tasks),
+            daemon=True,
+        ).start()
+        return
+
     if text == "/reminders":
         refresh_registry()
         now = datetime.now()
@@ -788,6 +804,29 @@ def handle_callback(data: str, cb_id: str, chat_id: str):
     # approve/skip/start — идут в очередь для фоновых задач
     if data in ("approve", "skip", "start"):
         callback_queue.put(data)
+        return
+
+    # ── Главное меню ──────────────────────────────────────────
+    if data.startswith("menu:"):
+        action = data.split(":", 1)[1]
+        # Для команд с аргументами — имитируем сообщение
+        cmd_map = {
+            "subjects": "/subjects", "tasks": "/tasks", "tasks_all": "/tasks_all",
+            "quizzes": "/quizzes",   "assignments": "/assignments",
+            "learn": "/learn",       "map": "/map",
+            "reminders": "/reminders", "stats": "/stats", "help": "/help",
+        }
+        if action == "scan":
+            send("🔍 Запускаю сканирование campus.fa.ru...")
+            threading.Thread(
+                target=lambda: _run_with_error_notify(
+                    lambda: scan_all_courses(os.getenv("SEMESTER", "2"))
+                ),
+                daemon=True,
+            ).start()
+        elif action in cmd_map:
+            handle_message({"text": cmd_map[action], "chat": {"id": chat_id}, "entities": []})
+        return
         return
 
     p = pending.get(chat_id)

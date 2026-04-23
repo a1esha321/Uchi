@@ -569,63 +569,106 @@ def build_task_list(subject_id: str) -> str:
     Парсит полную структуру курса и возвращает Telegram HTML
     со списком задач, сгенерированным AI.
     """
-    from course_requirements import RequirementsParser
-
     registry = SubjectRegistry()
     subject = registry.get(subject_id)
     if not subject:
         return "⚠️ Предмет не найден"
     if not subject.course_url:
-        return (
-            "⚠️ URL курса ещё не сохранён.\n"
-            "Выполни <code>/scan</code> (или <code>/scan_online</code>), "
-            "затем повтори <code>/tasks</code>."
-        )
+        return "⚠️ URL курса не сохранён. Выполни <code>/scan</code>, затем повтори."
 
-    base_url = subject.source_platform or None
     platform_root = (subject.source_platform or "https://campus.fa.ru").rstrip("/")
-
-    if subject.source_platform == ONLINE_FA_URL:
-        return (
-            f"⚠️ <b>{subject.name}</b>\n\n"
-            f"Курс на online.fa.ru использует SSO-авторизацию без локальной формы логина. "
-            f"Автоматический парсинг недоступен.\n\n"
-            f"Что можно сделать:\n"
-            f"• Открой курс вручную на online.fa.ru\n"
-            f"• Скопируй ссылку на страницу курса\n"
-            f"• Отправь <code>/debug_course &lt;ссылка&gt;</code> — "
-            f"бот получит дамп страницы пока ты залогинен через токен"
-        )
-
-    # Гарантируем абсолютный URL (старые записи могут хранить относительный путь)
     course_url = subject.course_url
     if course_url.startswith("/"):
         course_url = platform_root + course_url
 
-    bot = UniBrowser(headless=True, base_url=base_url)
     tg = TelegramNotifier()
+
+    if subject.source_platform == ONLINE_FA_URL:
+        return _build_task_list_online_fa(subject, course_url, registry, tg)
+
+    bot = UniBrowser(headless=True)
     try:
-        bot.login_any()
-        parser = RequirementsParser()
-        result = parser.parse(bot, course_url)
-        html = parser.format_html(result)
-
-        # Сохраняем структуру как конспект, чтобы AI знал о курсе
-        sections_text = parser.format_sections_html(result["sections"])
-        notes_dir = "notes"
-        os.makedirs(notes_dir, exist_ok=True)
-        path = f"{notes_dir}/{subject_id}_structure.txt"
-        import re as _re
-        plain = _re.sub(r"<[^>]+>", "", sections_text)
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(f"Структура курса: {result['course_name']}\n")
-            f.write("=" * 50 + "\n\n")
-            f.write(plain)
-        registry.add_notes(subject_id, path)
-
-        return html
+        bot.login()
+        return _run_task_parser(bot, subject, course_url, registry, tg)
     except Exception as e:
         tg.notify_error("build_task_list", str(e))
         return f"⚠️ Ошибка парсинга: {e}"
     finally:
         bot.close()
+
+
+def _build_task_list_online_fa(subject, course_url: str, registry, tg) -> str:
+    """
+    online.fa.ru: логинимся на campus.fa.ru, затем переходим напрямую
+    на URL курса — FA SSO-cookie передаётся через общий браузер.
+    """
+    bot = UniBrowser(headless=True)  # campus.fa.ru
+    try:
+        bot.login()
+        # Прямой переход без retry-логина — проверяем передачу SSO-сессии
+        bot.page.goto(course_url, timeout=60000)
+        bot.page.wait_for_load_state("networkidle")
+        time.sleep(4)
+
+        if "login" in bot.page.url.lower():
+            return (
+                f"⚠️ <b>{subject.name}</b>\n\n"
+                "online.fa.ru использует отдельный SSO, не связанный с campus.fa.ru.\n\n"
+                "Что сделать:\n"
+                f"• <code>/debug_course {course_url}</code> — дамп страницы для диагностики"
+            )
+
+        return _run_task_parser(bot, subject, course_url, registry, tg,
+                                already_on_page=True)
+    except Exception as e:
+        tg.notify_error("build_task_list[online]", str(e))
+        return f"⚠️ Ошибка парсинга online.fa.ru: {e}"
+    finally:
+        bot.close()
+
+
+def _run_task_parser(bot, subject, course_url: str, registry, tg,
+                     already_on_page: bool = False) -> str:
+    """Запускает парсер на уже залогиненном браузере."""
+    from course_requirements import RequirementsParser
+
+    parser = RequirementsParser()
+
+    if already_on_page:
+        info = bot.get_course_info()
+        sections = bot.get_course_structure()
+        activity_count = sum(len(s.get("activities", [])) for s in sections)
+        if activity_count == 0:
+            raise RuntimeError(
+                f"Курс открылся ({info.get('name', '?')}), но активностей не найдено.\n"
+                f"Диагностика: /debug_course {course_url}"
+            )
+        task_list = parser._generate_task_list(
+            info.get("name", ""), sections, info.get("description", "")
+        )
+        result = {
+            "course_name": info.get("name", ""),
+            "teacher_name": info.get("teacher_name", ""),
+            "teacher_requirements": info.get("description", ""),
+            "sections": sections,
+            "task_list": task_list,
+        }
+    else:
+        result = parser.parse(bot, course_url)
+
+    html = parser.format_html(result)
+    _save_course_notes(subject.subject_id, result, registry, parser)
+    return html
+
+
+def _save_course_notes(subject_id: str, result: dict, registry, parser) -> None:
+    """Сохраняет структуру курса в notes/ чтобы AI знал о ней."""
+    sections_text = parser.format_sections_html(result["sections"])
+    os.makedirs("notes", exist_ok=True)
+    path = f"notes/{subject_id}_structure.txt"
+    plain = re.sub(r"<[^>]+>", "", sections_text)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(f"Структура курса: {result['course_name']}\n")
+        f.write("=" * 50 + "\n\n")
+        f.write(plain)
+    registry.add_notes(subject_id, path)
