@@ -47,8 +47,25 @@ class RequirementsParser:
         sections и task_list.
         """
         browser.goto(course_url)
+
+        final_url = browser.page.url
+        if "login" in final_url.lower():
+            raise RuntimeError(
+                f"Не удалось открыть курс — браузер попал на страницу логина.\n"
+                f"URL: {final_url[:120]}\n"
+                f"Проверь UNI_LOGIN / UNI_PASSWORD в Railway."
+            )
+
         info = browser.get_course_info()
         sections = browser.get_course_structure()
+
+        activity_count = sum(len(s.get("activities", [])) for s in sections)
+        if activity_count == 0:
+            raise RuntimeError(
+                f"Курс открылся ({info.get('name', '?')}), но активностей не найдено.\n"
+                f"Возможно, Moodle использует нестандартную вёрстку.\n"
+                f"Используй /debug_course {course_url} для диагностики."
+            )
 
         task_list = self._generate_task_list(
             info.get("name", ""),
@@ -81,7 +98,10 @@ class RequirementsParser:
                 if a.get("description"):
                     lines.append(f"     ↳ {a['description'][:120]}")
 
-        activities_text = "\n".join(lines[:100]) or "Нет данных"
+        activities_text = "\n".join(lines[:100])
+        if not activities_text:
+            return "⚠️ Активностей не найдено — список задач сгенерировать невозможно."
+
         req_text = teacher_req[:2500] if teacher_req else "Не указаны"
 
         prompt = (

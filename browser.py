@@ -85,6 +85,13 @@ class UniBrowser:
         self.page.goto(url, timeout=60000)
         self.page.wait_for_load_state("networkidle")
         time.sleep(2)
+        # Если Moodle перекинул на логин — пробуем залогиниться ещё раз
+        if "login" in self.page.url.lower():
+            print(f"  ⚠️ Редирект на логин при переходе на {url[:80]}, повторный логин...")
+            self.login()
+            self.page.goto(url, timeout=60000)
+            self.page.wait_for_load_state("networkidle")
+            time.sleep(2)
 
     # ─── Поиск курсов ─────────────────────────────────────────
 
@@ -104,7 +111,8 @@ class UniBrowser:
                 time.sleep(3)
 
                 for el in self.page.query_selector_all('a[href*="/course/view.php"]'):
-                    href = el.get_attribute("href") or ""
+                    # evaluate() возвращает абсолютный URL (в отличие от get_attribute)
+                    href = el.evaluate("el => el.href") or ""
                     if "/course/view.php" not in href:
                         continue
                     name = el.inner_text().strip()

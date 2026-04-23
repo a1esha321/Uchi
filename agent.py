@@ -583,12 +583,19 @@ def build_task_list(subject_id: str) -> str:
         )
 
     base_url = subject.source_platform or None
+    platform_root = (subject.source_platform or "https://campus.fa.ru").rstrip("/")
+
+    # Гарантируем абсолютный URL (старые записи могут хранить относительный путь)
+    course_url = subject.course_url
+    if course_url.startswith("/"):
+        course_url = platform_root + course_url
+
     bot = UniBrowser(headless=True, base_url=base_url)
     tg = TelegramNotifier()
     try:
         bot.login()
         parser = RequirementsParser()
-        result = parser.parse(bot, subject.course_url)
+        result = parser.parse(bot, course_url)
         html = parser.format_html(result)
 
         # Сохраняем структуру как конспект, чтобы AI знал о курсе
