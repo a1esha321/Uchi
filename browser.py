@@ -191,19 +191,32 @@ class UniBrowser:
             print("✅ SSO авторизация прошла автоматически")
             return
 
-        # Шаг 3: ищем и жмём SSO/OAuth кнопку
+        # Шаг 3: ждём появления SSO кнопки (может рендериться JS)
+        try:
+            self.page.wait_for_selector(
+                '.potentialidplist, .login-identityproviders, '
+                'a[href*="/auth/"], button[class*="potentialidp"], '
+                'button[type="submit"]',
+                timeout=15000,
+            )
+        except Exception:
+            pass
+
+        # Ищем SSO кнопку — ссылка или кнопка/форма
         sso_selectors = [
             '.potentialidplist a', '.login-identityproviders a',
             'a[href*="/auth/oauth2"]', 'a[href*="/auth/oidc"]',
-            'a[href*="/auth/cas"]',  'a[href*="/auth/saml2"]',
-            'a[href*="oauth"]',      'a[href*="sso"]',
-            'a.btn:not([href*="signup"]):not([href*="forgot"])',
+            'a[href*="/auth/cas"]',   'a[href*="/auth/saml2"]',
+            'a[href*="oauth"]',       'a[href*="sso"]',
+            '.potentialidp button',   'button.potentialidp',
+            'form button[type="submit"]',
+            'a.btn:not([href*="signup"]):not([href*="forgot"]):not([href*="policy"]):not([href*="#"])',
         ]
         clicked = False
         for sel in sso_selectors:
             btn = self.page.query_selector(sel)
             if btn:
-                href = btn.evaluate("el => el.href") or ""
+                href = btn.evaluate("el => el.href || el.textContent || ''") or ""
                 print(f"  Нажимаю SSO: {href[:100]}")
                 btn.click()
                 self.page.wait_for_load_state("networkidle", timeout=30000)
@@ -212,14 +225,20 @@ class UniBrowser:
                 break
 
         if not clicked:
-            links = self.page.evaluate("""() =>
-                [...document.querySelectorAll('a[href]')].map(a =>
-                    a.href + ' :: ' + (a.innerText || '').trim().slice(0, 50)
-                ).join('\\n')
-            """) or "нет ссылок"
+            # Дамп всех кликабельных элементов для диагностики
+            dump = self.page.evaluate("""() => {
+                const out = [];
+                document.querySelectorAll('a[href]').forEach(a =>
+                    out.push('LINK: ' + a.href + ' :: ' + (a.innerText||'').trim().slice(0,50)));
+                document.querySelectorAll('button, input[type=submit]').forEach(b =>
+                    out.push('BTN: ' + (b.innerText||b.value||'').trim().slice(0,50)));
+                document.querySelectorAll('form').forEach(f =>
+                    out.push('FORM: action=' + f.action + ' method=' + f.method));
+                return out.join('\\n');
+            }""") or "нет элементов"
             raise RuntimeError(
                 f"Не нашёл SSO кнопку на {self.base_url}/login.\n"
-                f"Ссылки на странице:\n{links[:600]}"
+                f"Элементы на странице:\n{dump[:800]}"
             )
 
         if "login" in self.page.url.lower():
